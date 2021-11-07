@@ -12,7 +12,9 @@ aligned with VIN.
 
 The pressure sensor is installed with the pins bent the wrong way.  If you
 install it the right way there isn't enough clearance for the hose barb.  Pin 1
-(notched) goes in column 9, two holes up from the SCL pin.
+(notched) goes in column 9, two holes up from the SCL pin.  The mounting ears
+need to be removed to provide clearance for the USB and power connectors on the
+Arduino.  I simply clipped them off with wire cutters.
 
 Install the remaining passives and wiring.
 
