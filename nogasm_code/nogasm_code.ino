@@ -40,19 +40,13 @@
 #include <Encoder.h>
 #include <EEPROM.h>
 #include "FastLED.h"
-#include "RunningAverage.h"
+#include "RunningAverageT.h"
 
 //Running pressure average array length and update frequency
 #define RA_HIST_SECONDS 25 //25
 #define RA_FREQUENCY 6
 #define RA_TICK_PERIOD (FREQUENCY / RA_FREQUENCY)
 RunningAverageT<unsigned short, RA_FREQUENCY*RA_HIST_SECONDS> raPressure;
-
-#define HAS_FAT 0
-#if defined(HAS_FAT) && HAS_FAT==1
-#include "SdFat.h"
-#include "FreeStack.h"
-#endif
 
 //LCD
 #define U8X8_HAVE_HW_I2C
@@ -93,7 +87,11 @@ Encoder myEnc(3, 2); //Quadrature inputs
 #define ENC_SW_DOWN LOW
 
 //Motor
-//#define MOTPIN 9
+constexpr uint8_t PIN_VIBRATOR_ONOFF = 12;
+constexpr uint8_t PIN_VIBRATOR_DOWN = 8;
+constexpr uint8_t PIN_VIBRATOR_UP = 13;
+constexpr uint8_t VIBRATOR_PUSH_DELAY = 100;
+
 
 //Pressure Sensor Analog In
 #define BUTTPIN A0
@@ -359,8 +357,11 @@ void setup() {
   //pinMode(MOTPIN, OUTPUT); //Enable "analog" out (PWM)
 
   pinMode(BUTTPIN, INPUT); //default is 10 bit resolution (1024), 0-3.3
-
   raPressure.clear(); //Initialize a running pressure average
+
+  pinMode(PIN_VIBRATOR_ONOFF, LOW);
+  pinMode(PIN_VIBRATOR_UP, LOW);
+  pinMode(PIN_VIBRATOR_DOWN, LOW);
 
   //Check memory, if size is 0, we failed to allocate...
   if (raPressure.getSize() == 0)
@@ -399,9 +400,6 @@ void setup() {
 
 //=======Vibrator Control=================
 static int clamp(const int val, const int minVal, const int maxVal) { return max(min(val, maxVal), minVal); };
-constexpr uint8_t PIN_VIBRATOR_ONOFF = 0;
-constexpr uint8_t PIN_VIBRATOR_UP = 1;
-constexpr uint8_t PIN_VIBRATOR_DOWN = 4;
 static uint8_t g_vibrator_mode = 0; //off
 void set_vibrator_mode(int fromStrength, int toStrength)
 {
@@ -412,10 +410,12 @@ void set_vibrator_mode(int fromStrength, int toStrength)
   {
     //turn on:
     digitalWrite(PIN_VIBRATOR_ONOFF, HIGH);
-    delay(10);
+    delay(VIBRATOR_PUSH_DELAY);
     digitalWrite(PIN_VIBRATOR_ONOFF, LOW);
-    delay(10);
+    delay(VIBRATOR_PUSH_DELAY);
     Serial.println(F("[VIBRATOR]\tTurned on"));
+    //consume increase;
+    fromStrength++;
   }
 
   int diff = toStrength-fromStrength;
@@ -425,9 +425,9 @@ void set_vibrator_mode(int fromStrength, int toStrength)
     {
       //turn up:
       digitalWrite(PIN_VIBRATOR_UP, HIGH);
-      delay(10);
+      delay(VIBRATOR_PUSH_DELAY);
       digitalWrite(PIN_VIBRATOR_UP, LOW);
-      delay(10);
+      delay(VIBRATOR_PUSH_DELAY);
       Serial.println(F("[VIBRATOR]\tTurned UP"));
     }
   }
@@ -437,9 +437,9 @@ void set_vibrator_mode(int fromStrength, int toStrength)
     {
       //turn down:
       digitalWrite(PIN_VIBRATOR_DOWN, HIGH);
-      delay(10);
+      delay(VIBRATOR_PUSH_DELAY);
       digitalWrite(PIN_VIBRATOR_DOWN, LOW);
-      delay(10);
+      delay(VIBRATOR_PUSH_DELAY);
       Serial.println(F("[VIBRATOR]\tTurned DOWN"));
     }    
   }
@@ -448,9 +448,9 @@ void set_vibrator_mode(int fromStrength, int toStrength)
   {
     //turn off:
     digitalWrite(PIN_VIBRATOR_ONOFF, HIGH);
-    delay(10);
+    delay(VIBRATOR_PUSH_DELAY);
     digitalWrite(PIN_VIBRATOR_ONOFF, LOW);
-    delay(10);
+    delay(VIBRATOR_PUSH_DELAY);
     Serial.println(F("[VIBRATOR]\tTurned OFF"));
   }
 
@@ -717,9 +717,11 @@ uint8_t set_state(uint8_t btnState, uint8_t state){
     Serial.println(F("power off"));
     fill_gradient_RGB(leds,0,CRGB::Black,NUM_LEDS-1,CRGB::Black);//Turn off LEDS
     FastLED.show();
-    analogWrite(MOTPIN, 0);
+    vibrator_off();
+    //analogWrite(MOTPIN, 0);
     beep_motor(2093,1396,1047);
-    analogWrite(MOTPIN, 0); //Turn Motor off
+    //analogWrite(MOTPIN, 0); //Turn Motor off
+    vibrator_off();
     while(!digitalRead(ENC_SW))delay(1);
     beep_motor(1047,1396,2093);
     return MANUAL ;
@@ -775,8 +777,15 @@ void loop() {
     }
     fadeToBlackBy(leds,NUM_LEDS,20); //Create a fading light effect. LED buffer is not otherwise cleared
     uint8_t btnState = check_button();
-    state = set_state(btnState,state); //Set the next state based on this state and button presses
-    run_state_machine(state);
+    const auto newState = set_state(btnState,state); //Set the next state based on this state and button presses
+    if (newState != state)
+    { //state changed
+      if (state == AUTO)
+      {
+        //g_Storage.BeginSession();
+      }
+    }
+    run_state_machine(newState);
     FastLED.show(); //Update the physical LEDs to match the buffer in software
 
     //Alert that the Pressure voltage amplifier is railing, and the trim pot needs to be adjusted
