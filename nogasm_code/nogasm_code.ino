@@ -41,6 +41,9 @@
 #include <EEPROM.h>
 #include "FastLED.h"
 #include "RunningAverageT.h"
+#include <Arduino.h>
+#include <AceRoutine.h>
+using namespace ace_routine;
 
 //Running pressure average array length and update frequency
 #define RA_HIST_SECONDS 25 //25
@@ -130,17 +133,34 @@ uint8_t state = MANUAL;
 
 CRGB leds[NUM_LEDS];
 
-int pressure = 0;
+int g_pressure = 0;
 int avgPressure = 0; //Running 25 second average pressure
 //int bri =100; //Brightness setting
-int rampTimeS = 60; //Ramp-up time, in seconds
-#define DEFAULT_PLIMIT 600
+int rampTimeS = 120; //Ramp-up time, in seconds
+float s_cooldownTime = 0.40f;//0.5f;
+#define DEFAULT_PLIMIT 900
 int pLimit = DEFAULT_PLIMIT; //Limit in change of pressure before the vibrator turns off
 int pLimitLast = DEFAULT_PLIMIT;
 int maxSpeed = 255; //maximum speed the motor will ramp up to in automatic mode
 float motSpeed = 0; //Motor speed, 0-255 (float to maintain smooth ramping to low speeds)
 uint16_t edgeCount = 0;
 auto lastEdgeCountChange = millis();
+
+//Utility
+static int clamp(const int val, const int minVal, const int maxVal) { return (val<minVal) ? minVal : (val>maxVal ? maxVal : val); };
+void beep_motor(int f1, int f2, int f3) {
+  /*
+    analogWrite(MOTPIN, 0);
+    tone(MOTPIN, f1);
+    delay(250);
+    tone(MOTPIN, f2);
+    delay(250);
+    tone(MOTPIN, f3);
+    delay(250);
+    noTone(MOTPIN);
+    analogWrite(MOTPIN, motSpeed);
+  */
+}
 
 //======= DEBUG ===============================
 #define DEBUG_LOG_ENABLED 0
@@ -159,11 +179,11 @@ void logDebug()
 #endif
   Serial.print(motSpeed); //Motor speed (0-255)
   Serial.print(F(","));
-  Serial.print(pressure); //(Original ADC value - 12 bits, 0-4095)
+  Serial.print(g_pressure); //(Original ADC value - 12 bits, 0-4095)
   Serial.print(F(","));
   Serial.print(avgPressure); //Running average of (default last 25 seconds) pressure
   Serial.print(F(","));
-  Serial.print(pressure - avgPressure);
+  Serial.print(g_pressure - avgPressure);
   Serial.print(F(","));
   Serial.print(pLimit);
   Serial.println(F(","));
@@ -186,12 +206,16 @@ union lcdrenderdata_t
   int32_t integer32;
   const char* stringptr;
 
-  operator =(const int32_t arg) {
+  int32_t operator=(const int32_t arg) 
+  {
     integer32 = arg;
+    return arg;
   }
 
-  operator =(const char* arg) {
+  const char* operator =(const char* arg) 
+  {
     stringptr = arg;
+    return arg;
   }
 } lcdrenderdata[2]{};
 
@@ -221,7 +245,7 @@ static void lcdfunc_renderPressure()
 {
   u8g2.setFont(font_13pt);
   u8g2.setCursor(0, 20);
-  u8g2.print("P");
+  u8g2.print(F("P"));
   u8g2.setFont(font_24pt);
   u8g2.setCursor(10, u8g2.getMaxCharHeight());
   u8g2.print(lcdrenderdata[0].integer32);
@@ -232,12 +256,12 @@ static void lcdfunc_renderTarget()
 {
   u8g2.setFont(font_13pt);
   u8g2.setCursor(0, 20);
-  u8g2.print("T ");
+  u8g2.print(F("T "));
   u8g2.setFont(font_15pt );
   u8g2.setCursor(10, u8g2.getMaxCharHeight());
   u8g2.print(lcdrenderdata[0].integer32);
   u8g2.setFont(font_13pt);
-  u8g2.print(" / ");
+  u8g2.print(F(" / "));
   u8g2.setFont(font_15pt);
   u8g2.print(lcdrenderdata[1].integer32);
 
@@ -312,167 +336,227 @@ static void lcdfunc_edgeCount()
     u8g2.setCursor(u8g2.getDisplayWidth() - u8g2.getMaxCharWidth() - 4, u8g2.getMaxCharHeight()+8);
     u8g2.print(symbol);    
   }
-  
 }
 
-//=======Setup=======================================
-//Beep out tones over the motor by frequency (1047,1396,2093) may work well
-void beep_motor(int f1, int f2, int f3) {
-  /*
-    analogWrite(MOTPIN, 0);
-    tone(MOTPIN, f1);
-    delay(250);
-    tone(MOTPIN, f2);
-    delay(250);
-    tone(MOTPIN, f3);
-    delay(250);
-    noTone(MOTPIN);
-    analogWrite(MOTPIN, motSpeed);
-  */
-}
-void setup() {
+/////////////////////////////////////////////////////
+// LCD
+
+class LCD : public Coroutine
+{
+  protected:
+    void run_lcd_status(uint8_t state);
+  public:
+    void Setup();
+    void Update();
+    virtual int runCoroutine() override 
+    {
+      COROUTINE_LOOP()
+      {
+        Update();
+        COROUTINE_YIELD();
+      }
+    }
+};
+
+void LCD::Setup()
+{
   u8g2.begin();
-  /*
-  u8g2.setFont(u8g2_font_ncenB14_tr);
-  u8g2.firstPage();
-  do {
-    u8g2.setCursor(0, 20);
-    u8g2.print(F("Hello World!"));
-  } while ( u8g2.nextPage() );*/
   setLCDFunc(lcdfunc_renderText, __DATE__, __TIME__);
   do {
     lcdrender_activefunc();
   } while( u8g2.nextPage() );
   lcdrender_activefunc = nullptr;
-  pinMode(ENC_SW,   INPUT); //Pin to read when encoder is pressed
-  digitalWrite(ENC_SW, HIGH); // Encoder switch pullup
+}
 
-  analogReference(EXTERNAL);
+void LCD::Update()
+{
+  if (lcdrender_activefunc != nullptr)
+  {
+    lcdrender_activefunc();
+    if (!u8g2.nextPage())
+    {
+      memset(&lcdrenderdata[0], 0, sizeof(lcdrenderdata));
+      lcdrender_activefunc = nullptr;
+    }
+  }
+  else
+  {
+    run_lcd_status(state);
+  }
+}
 
-  // Classic AVR based Arduinos have a PWM frequency of about 490Hz which
-  // causes the motor to whine.  Change the prescaler to achieve 31372Hz.
-  //sbi(TCCR1B, CS10);
-  //cbi(TCCR1B, CS11);
-  //cbi(TCCR1B, CS12);
-  //pinMode(MOTPIN, OUTPUT); //Enable "analog" out (PWM)
+void LCD::run_lcd_status(uint8_t state)
+{
+  static int8_t mode = 0;
+  static auto lastChange = millis();
+  const auto now = millis();
 
-  pinMode(BUTTPIN, INPUT); //default is 10 bit resolution (1024), 0-3.3
-  raPressure.clear(); //Initialize a running pressure average
+  if ( (now - lastChange) > 5000 )
+  {
+    mode++;
+    lastChange = now;
+  }
 
+  if ( (now-lastTargetChange) < 15000 )
+  {
+    mode = 1;
+  }
+
+  if ( (now - lastEdgeCountChange) < 5000 )
+  {
+    mode = 2;
+  }
+  
+  switch (mode % 3)
+  {
+    case 0:
+      {
+        setLCDFunc(lcdfunc_renderPressure, avgPressure);
+      } break;
+    case 1:
+      {
+        setLCDFunc(lcdfunc_renderTarget, max(0, g_pressure - avgPressure), max(0, pLimit));
+      } break;
+    case 2:
+    {
+      setLCDFunc(lcdfunc_edgeCount, edgeCount);
+    } break;
+  }
+}
+LCD g_lcd;
+/////////////////////////////////////////////////////
+// Vibrator
+class Vibrator : Coroutine
+{
+  struct
+  {
+    bool powered = false;
+    uint8_t mode = 0;
+  } _currentState, _targetState;
+  static constexpr uint8_t MAX_LEVEL = 6;
+  public:
+    void Setup();
+    void Update();
+    void vibrator_up();
+    void vibrator_down();
+    void vibrator_off();
+    void vibrator_on();
+    void vibrator_to(const int mode);
+    void set_vibrator_mode(int fromStrength, int toStrength);
+    int map_motspeed_to_vibrator();
+
+    virtual int runCoroutine() override 
+    {
+      static int8_t i=0;
+      static int8_t diff=0;
+      COROUTINE_LOOP()
+      {
+        diff = getStateDiff();
+
+
+
+        if (_currentState.powered == false && _targetState.powered == true)
+        {
+          //turn on:
+          _currentState.powered = true;
+          digitalWrite(PIN_VIBRATOR_ONOFF, HIGH);
+          COROUTINE_DELAY(VIBRATOR_PUSH_DELAY);
+          digitalWrite(PIN_VIBRATOR_ONOFF, LOW);
+          COROUTINE_DELAY(VIBRATOR_PUSH_DELAY);
+          Serial.println(F("[VIBRATOR]\tTurned on"));
+        } else if (_currentState.powered == true  && _targetState.powered == false)
+        {
+          //turn off:
+          _currentState.powered = false;
+          digitalWrite(PIN_VIBRATOR_ONOFF, HIGH);
+          COROUTINE_DELAY(VIBRATOR_PUSH_DELAY);
+          digitalWrite(PIN_VIBRATOR_ONOFF, LOW);
+          COROUTINE_DELAY(VIBRATOR_PUSH_DELAY);
+          Serial.println(F("[VIBRATOR]\tTurned off"));
+        }
+
+        if (_currentState.powered)
+        {        
+          if (diff != 0)
+          {
+            Serial.print(F("[VIBRATOR] "));
+            Serial.print(_currentState.mode);
+            Serial.print(F(" -> "));
+            Serial.println(_targetState.mode);
+          }
+          if (diff > 0)
+          {
+            for (i = 0; i < diff; i++)
+            {
+              //turn up:
+              _currentState.mode++;
+              digitalWrite(PIN_VIBRATOR_UP, HIGH);
+              COROUTINE_DELAY(VIBRATOR_PUSH_DELAY);
+              digitalWrite(PIN_VIBRATOR_UP, LOW);
+              COROUTINE_DELAY(VIBRATOR_PUSH_DELAY);
+              Serial.println(_currentState.mode);
+              Serial.println(F("[VIBRATOR]\tTurned UP"));
+            }
+          }
+          else if (diff < 0)
+          {
+            for (i = 0; i < -diff; i++)
+            {
+              //turn down:
+              _currentState.mode--;
+              digitalWrite(PIN_VIBRATOR_DOWN, HIGH);
+              COROUTINE_DELAY(VIBRATOR_PUSH_DELAY);
+              digitalWrite(PIN_VIBRATOR_DOWN, LOW);
+              COROUTINE_DELAY(VIBRATOR_PUSH_DELAY);
+              Serial.println(F("[VIBRATOR]\tTurned DOWN"));
+            }
+          }
+        }
+
+        COROUTINE_YIELD();
+      }
+    }
+  protected:
+    int8_t getStateDiff() const 
+    { 
+        int8_t fromStrength = clamp(static_cast<int8_t>(_currentState.mode), 0, MAX_LEVEL);
+        int8_t toStrength = clamp(static_cast<int8_t>(_targetState.mode), 0, MAX_LEVEL);
+        return toStrength - fromStrength; 
+      }
+};
+
+void Vibrator::Setup()
+{
   pinMode(PIN_VIBRATOR_ONOFF, LOW);
   pinMode(PIN_VIBRATOR_UP, LOW);
   pinMode(PIN_VIBRATOR_DOWN, LOW);
 
-  //Check memory, if size is 0, we failed to allocate...
-  if (raPressure.getSize() == 0)
-  {
-    setLCDFunc(lcdfunc_renderText, F("OUT OF MEM"));
-    do {
-      lcdrender_activefunc();
-    } while( u8g2.nextPage() );
-    pinMode(LED_BUILTIN, OUTPUT);
-    while(true)
-    {
-      digitalWrite(LED_BUILTIN, HIGH);
-      delay(100);
-      digitalWrite(LED_BUILTIN, LOW);
-      delay(100);
-    }
-  }
-
   //Make sure the motor is off
   vibrator_off();
-
-  delay(3000); // 3 second delay for recovery
-
-  Serial.begin(115200);
-
-  FastLED.addLeds<LED_TYPE, LED_PIN, COLOR_ORDER>(leds, NUM_LEDS).setCorrection(TypicalLEDStrip);
-  // limit power draw to .6A at 5v... Didn't seem to work in my FastLED version though
-  //FastLED.setMaxPowerInVoltsAndMilliamps(5,DEFAULT_PLIMIT);
-  FastLED.setBrightness(BRIGHTNESS);
-
-  //Recall saved settings from memory
-  sensitivity = EEPROM.read(SENSITIVITY_ADDR);
-  maxSpeed = min(EEPROM.read(MAX_SPEED_ADDR), MOT_MAX); //Obey the MOT_MAX the first power  cycle after chaning it.
-  beep_motor(1047,1396,2093); //Power on beep
 }
 
-//=======Vibrator Control=================
-static int clamp(const int val, const int minVal, const int maxVal) { return max(min(val, maxVal), minVal); };
-static uint8_t g_vibrator_mode = 0; //off
-void set_vibrator_mode(int fromStrength, int toStrength)
+void Vibrator::Update()
 {
-  fromStrength = clamp(fromStrength, 0, 5);
-  toStrength = clamp(toStrength, 0, 5);
-  
-  if (fromStrength == 0)
-  {
-    //turn on:
-    digitalWrite(PIN_VIBRATOR_ONOFF, HIGH);
-    delay(VIBRATOR_PUSH_DELAY);
-    digitalWrite(PIN_VIBRATOR_ONOFF, LOW);
-    delay(VIBRATOR_PUSH_DELAY);
-    Serial.println(F("[VIBRATOR]\tTurned on"));
-    //consume increase;
-    fromStrength++;
-  }
 
-  int diff = toStrength-fromStrength;
-  if (diff > 0)
-  {
-    for (int i=0; i < diff; i++)
-    {
-      //turn up:
-      digitalWrite(PIN_VIBRATOR_UP, HIGH);
-      delay(VIBRATOR_PUSH_DELAY);
-      digitalWrite(PIN_VIBRATOR_UP, LOW);
-      delay(VIBRATOR_PUSH_DELAY);
-      Serial.println(F("[VIBRATOR]\tTurned UP"));
-    }
-  }
-  else if (diff < 0)
-  {
-    for (int i=0; i < -diff; i++)
-    {
-      //turn down:
-      digitalWrite(PIN_VIBRATOR_DOWN, HIGH);
-      delay(VIBRATOR_PUSH_DELAY);
-      digitalWrite(PIN_VIBRATOR_DOWN, LOW);
-      delay(VIBRATOR_PUSH_DELAY);
-      Serial.println(F("[VIBRATOR]\tTurned DOWN"));
-    }    
-  }
-
-  if (toStrength == 0)
-  {
-    //turn off:
-    digitalWrite(PIN_VIBRATOR_ONOFF, HIGH);
-    delay(VIBRATOR_PUSH_DELAY);
-    digitalWrite(PIN_VIBRATOR_ONOFF, LOW);
-    delay(VIBRATOR_PUSH_DELAY);
-    Serial.println(F("[VIBRATOR]\tTurned OFF"));
-  }
-
-  if (g_vibrator_mode != toStrength)
-  {
-    Serial.print(F("[VIBRATOR]\t Strength "));
-    Serial.print(g_vibrator_mode);
-    Serial.print(F(" -> "));
-    Serial.println(toStrength);
-  }
-  g_vibrator_mode = toStrength;
 }
-static void vibrator_up() { set_vibrator_mode(g_vibrator_mode, g_vibrator_mode+1); }
-static void vibrator_down() { set_vibrator_mode(g_vibrator_mode, g_vibrator_mode-1); }
-static void vibrator_off() { if (g_vibrator_mode!=0) set_vibrator_mode(g_vibrator_mode, 0); }
-static void vibrator_on() { if (g_vibrator_mode==0) set_vibrator_mode(g_vibrator_mode, 1); }
-static void vibrator_to(const int mode) { if (g_vibrator_mode != mode) { set_vibrator_mode(g_vibrator_mode, mode); }; }
 
-static int map_motspeed_to_vibrator()
+void Vibrator::vibrator_up() { if (_targetState.mode<MAX_LEVEL) {  _targetState.mode++; } }
+void Vibrator::vibrator_down() { if (_targetState.mode>0) { _targetState.mode--; } }
+void Vibrator::vibrator_off() { _targetState.powered = false; }
+void Vibrator::vibrator_on() { if (!_targetState.powered) { _targetState.powered = true; } }
+void Vibrator::vibrator_to(const int mode) 
+{ 
+  if(mode > 0)
+  {
+    _targetState.mode = clamp(mode-1, 0, MAX_LEVEL); 
+  }
+}
+
+int Vibrator::map_motspeed_to_vibrator()
 {
-  const float pct[] = { 0.3, 0.22, 0.27, 0.21 };
-  static unsigned char ranges[5][2];
+  const float pct[] = { 0.25, 0.21, 0.17, 0.13, 0.13, 0.11 };
+  static constexpr uint8_t speedCount = (sizeof(pct)/sizeof(pct[0]));
+  static uint8_t ranges[speedCount+1][2];
   static bool initialized = false;
   if(!initialized)
   {
@@ -484,12 +568,23 @@ static int map_motspeed_to_vibrator()
     unsigned int lastValue = 1;
     
     //1,2,3,4 speed settinsg:
-    for(auto i=0; i < 4; i++)
+    for(auto i=0; i < speedCount; i++)
     {
       ranges[1+i][0] = lastValue;
-      ranges[1+i][1] = lastValue + static_cast<char>(pct[i] * 255.0);
+      ranges[1+i][1] = static_cast<uint8_t>(clamp(lastValue + static_cast<int>(pct[i] * 255.0f), 0, 255));
       lastValue = ranges[1+i][1];
     }
+#if 0
+    for(auto i=0; i < speedCount+1; i++)
+    {
+      Serial.print(F("["));
+      Serial.print(i);
+      Serial.print(F("] "));
+      Serial.print(ranges[i][0]);
+      Serial.print(F("-"));
+      Serial.println(ranges[i][1]);
+    }
+#endif
   }
 
   if(motSpeed >= maxSpeed)
@@ -499,7 +594,7 @@ static int map_motspeed_to_vibrator()
   }
 
   //Map motSpeed to index:
-  for (auto i=0; i < 5; i++)
+  for (auto i=0; i < speedCount+1; i++)
   {
     if (motSpeed >= ranges[i][0] && motSpeed < ranges[i][1])
     {
@@ -507,6 +602,376 @@ static int map_motspeed_to_vibrator()
     }
   }
   return -1;
+}
+static Vibrator g_vibrator;
+
+/////////////////////////////////////////////////////
+// LEDs
+class LEDs : Coroutine
+{
+  public:
+    void Setup();
+    void Update();
+
+    virtual int runCoroutine() override 
+    {
+      COROUTINE_LOOP()
+      {
+        Update();
+        COROUTINE_YIELD();
+      }
+    }
+};
+
+void LEDs::Setup()
+{
+   FastLED.addLeds<LED_TYPE, LED_PIN, COLOR_ORDER>(leds, NUM_LEDS).setCorrection(TypicalLEDStrip);
+  // limit power draw to .6A at 5v... Didn't seem to work in my FastLED version though
+  //FastLED.setMaxPowerInVoltsAndMilliamps(5,DEFAULT_PLIMIT);
+  FastLED.setBrightness(BRIGHTNESS);
+}
+
+void LEDs::Update()
+{
+}
+LEDs g_leds;
+
+/////////////////////////////////////////////////////
+// Sensor
+class Sensor : Coroutine
+{
+public:
+    void Setup()
+    {
+      analogReference(EXTERNAL);
+      pinMode(BUTTPIN, INPUT); //default is 10 bit resolution (1024), 0-3.3
+      raPressure.clear();      //Initialize a running pressure average
+
+      //Check memory, if size is 0, we failed to allocate...
+      if (raPressure.getSize() == 0)
+      {
+        setLCDFunc(lcdfunc_renderText, F("OUT OF MEM"));
+        do
+        {
+          lcdrender_activefunc();
+        } while (u8g2.nextPage());
+        pinMode(LED_BUILTIN, OUTPUT);
+        while (true)
+        {
+          digitalWrite(LED_BUILTIN, HIGH);
+          delay(100);
+          digitalWrite(LED_BUILTIN, LOW);
+          delay(100);
+        }
+      }
+    }
+
+    virtual int runCoroutine() override 
+    {
+      static auto s_lastTime = micros();
+      static uint32_t s_tick = 0;
+      static int32_t s_tickaccumulator = 0;
+      static uint32_t s_lastTick = 0;
+
+      COROUTINE_LOOP()
+      {
+        static auto time = micros();
+        static auto timeMillis = millis();
+        static auto elapsed = 0ul;
+        time = micros();
+        timeMillis = micros();
+        elapsed = [&]()
+        {
+          if (time >= s_lastTime)
+          {
+            return time - s_lastTime;
+          }
+          else
+          {
+            return (ULONG_MAX - s_lastTime) + time;
+          }
+        }();
+        s_lastTime = time;
+
+        s_tickaccumulator += elapsed;
+        if (s_tickaccumulator >= 1e6 / 60)
+        {
+          s_tickaccumulator -= 1e6 / 60;
+          s_tick++;
+        }
+
+        if (s_lastTick != s_tick)
+        {
+          s_lastTick = s_tick;
+          if (s_tick % RA_TICK_PERIOD == 0)
+          {
+            raPressure.addValue(g_pressure);
+            avgPressure = raPressure.getAverage();
+          }
+
+          static int l_pressure = 0;
+          l_pressure = 0;
+          static uint8_t i = 0;
+          for (i = OVERSAMPLE; i; --i)
+          {
+            l_pressure += analogRead(BUTTPIN);
+            if (i)
+            {           // Don't delay after the last sample
+              COROUTINE_DELAY(1); // Spread samples out a little
+            }
+          }
+          g_pressure = l_pressure;
+        }
+        COROUTINE_YIELD();
+      }
+    }
+};
+Sensor g_sensor;
+
+/////////////////////////////////////////////////////
+// Logic
+class Logic : Coroutine
+{
+  protected:
+    void run_auto();
+    void run_manual();
+    uint8_t check_button();
+    void run_state_machine(uint8_t state);
+    uint8_t set_state(uint8_t btnState, uint8_t state);
+  public:
+    void Setup();
+    void Update();
+
+    virtual int runCoroutine() override 
+    {
+      COROUTINE_LOOP()
+      {       
+        fadeToBlackBy(leds,NUM_LEDS,20); //Create a fading light effect. LED buffer is not otherwise cleared
+        static uint8_t l_btnState = 0;
+        l_btnState = check_button();
+
+        static auto l_newState = 0;
+        l_newState = set_state(l_btnState,state); //Set the next state based on this state and button presses
+
+        if (l_newState != state)
+        { //state changed
+          if (state == AUTO)
+          {
+            //g_Storage.BeginSession();
+          }
+        }
+        run_state_machine(l_newState);
+        state = l_newState;
+        FastLED.show(); //Update the physical LEDs to match the buffer in software
+
+        //Alert that the Pressure voltage amplifier is railing, and the trim pot needs to be adjusted
+        if(g_pressure > 4030)beep_motor(2093,2093,2093); //Three high beeps
+        COROUTINE_YIELD();
+      }
+    }
+  private:
+    static int sampleTick;
+};
+int Logic::sampleTick = 0;
+
+void Logic::Setup()
+{
+  pinMode(ENC_SW,   INPUT); //Pin to read when encoder is pressed
+  digitalWrite(ENC_SW, HIGH); // Encoder switch pullup
+
+  //Storage:
+  sensitivity = EEPROM.read(SENSITIVITY_ADDR);
+  maxSpeed = min(EEPROM.read(MAX_SPEED_ADDR), MOT_MAX); //Obey the MOT_MAX the first power  cycle after chaning it.
+  beep_motor(1047,1396,2093); //Power on beep
+}
+
+void Logic::Update()
+{
+
+    //Run this section at the update frequency (default 60 Hz)
+  if (millis() % period == 0) {   
+    //Report pressure and motor data over USB for analysis / other uses. timestamps disabled by default
+    logDebug();
+  }
+}
+
+// Manual vibrator control mode (red), still shows orgasm closeness in background
+void Logic::run_manual() 
+{
+  //In manual mode, only allow for 13 cursor positions, for adjusting motor speed.
+  const int knob = encLimitRead(0,NUM_LEDS-1);
+  motSpeed = map(knob, 0, NUM_LEDS - 1, 0., (float)MOT_MAX);
+
+  const auto setting = g_vibrator.map_motspeed_to_vibrator();
+  if (setting > 0)
+  {
+    g_vibrator.vibrator_on();
+    g_vibrator.vibrator_to(setting);
+  }
+  else
+  {
+    g_vibrator.vibrator_off();
+    g_vibrator.vibrator_to(0);
+  }
+
+  //gyrGraphDraw(avgPressure, 0, 4 * 3 * NUM_LEDS);
+  const int presDraw = map(constrain(g_pressure - avgPressure, 0, pLimit),0,pLimit,0,NUM_LEDS*3);
+  draw_bars_3(presDraw, CRGB::Green,CRGB::Yellow,CRGB::Red);
+  draw_cursor(knob, CRGB::Red);
+}
+
+// Automatic edging mode, knob adjust sensitivity.
+void Logic::run_auto() 
+{
+  static float motIncrement = 0.0;
+  motIncrement = ((float)maxSpeed / ((float)FREQUENCY * (float)rampTimeS));
+
+  int knob = encLimitRead(0,(3*NUM_LEDS)-1);
+  sensitivity = knob*4; //Save the setting if we leave and return to this state
+  //Reverse "Knob" to map it onto a pressure limit, so that it effectively adjusts sensitivity
+  pLimit = map(knob, 0, 3 * (NUM_LEDS - 1), DEFAULT_PLIMIT, 1); //set the limit of delta pressure before the vibrator turns off
+  if (pLimit != pLimitLast)
+  {
+    pLimitLast = pLimit;
+    lastTargetChange = millis();
+  }
+  //When someone clenches harder than the pressure limit
+  if (g_pressure - avgPressure > pLimit) {
+    if (motSpeed > 0.0f)
+    {
+      g_vibrator.vibrator_off();
+      g_vibrator.vibrator_to(0);
+      edgeCount++;
+      lastEdgeCountChange = millis();
+    }
+    motSpeed = -s_cooldownTime*(float)rampTimeS*((float)FREQUENCY*motIncrement);//Stay off for a while (half the ramp up time)
+    
+  }
+  else if (motSpeed < (float)maxSpeed) {
+    motSpeed += motIncrement;
+  }
+
+  const auto setting = g_vibrator.map_motspeed_to_vibrator();
+  if (setting > 0)
+  {
+    g_vibrator.vibrator_on();
+    g_vibrator.vibrator_to(setting);
+  }
+  else
+  {
+    g_vibrator.vibrator_off();
+    g_vibrator.vibrator_to(0);
+  }
+  
+  int presDraw = map(constrain(g_pressure - avgPressure, 0, pLimit), 0, pLimit, 0, NUM_LEDS * 3);
+  draw_bars_3(presDraw, CRGB::Green, CRGB::Yellow, CRGB::Red);
+  draw_cursor_3(knob, CRGB(50, 50, 200), CRGB::Blue, CRGB::Purple);
+}
+
+//Poll the knob click button, and check for long/very long presses as well
+uint8_t Logic::check_button()
+{
+  static bool lastBtn = ENC_SW_DOWN;
+  static unsigned long keyDownTime = 0;
+  uint8_t btnState = BTN_NONE;
+  bool thisBtn = digitalRead(ENC_SW);
+
+  //Detect single presses, no repeating, on keyup
+  if(thisBtn == ENC_SW_DOWN && lastBtn == ENC_SW_UP){
+    keyDownTime = millis();
+  }
+  
+  if (thisBtn == ENC_SW_UP && lastBtn == ENC_SW_DOWN) { //there was a keyup
+    if((millis()-keyDownTime) >= V_LONG_PRESS_MS){
+      btnState = BTN_V_LONG;
+    }
+    else if((millis()-keyDownTime) >= LONG_PRESS_MS){
+      btnState = BTN_LONG;
+      }
+    else{
+      btnState = BTN_SHORT;
+      }
+    }
+
+  lastBtn = thisBtn;
+  return btnState;
+}
+
+//run the important/unique parts of each state. Also, set button LED color.
+void Logic::run_state_machine(uint8_t state)
+{
+  switch (state) {
+    case MANUAL:
+      run_manual();
+      break;
+    case AUTO:
+      run_auto();
+      break;
+    default:
+      run_manual();
+      break;
+  }
+}
+
+//Switch between state machine states, and reset the encoder position as necessary
+//Returns the next state to run. Very long presses will turn the system off (sort of)
+uint8_t Logic::set_state(uint8_t btnState, uint8_t state)
+{
+  if(btnState == BTN_NONE){
+    return state;
+  }
+  if(btnState == BTN_V_LONG){
+    //Turn the device off until woken up by the button
+    Serial.println(F("power off"));
+    fill_gradient_RGB(leds,0,CRGB::Black,NUM_LEDS-1,CRGB::Black);//Turn off LEDS
+    FastLED.show();
+    g_vibrator.vibrator_off();
+    //analogWrite(MOTPIN, 0);
+    beep_motor(2093,1396,1047);
+    //analogWrite(MOTPIN, 0); //Turn Motor off
+    g_vibrator.vibrator_off();
+    while(!digitalRead(ENC_SW))delay(1);
+    beep_motor(1047,1396,2093);
+    return MANUAL ;
+  }
+  else if(btnState == BTN_SHORT){
+    switch(state){
+      case MANUAL:
+        myEnc.write(sensitivity);//Whenever going into auto mode, keep the last sensitivity
+        motSpeed = 0; //Also reset the motor speed to 0
+        return AUTO;
+      case AUTO:
+        myEnc.write(0);//Whenever going into manual mode, set the speed to 0.
+        motSpeed = 0;
+        EEPROM.update(SENSITIVITY_ADDR, sensitivity);
+        return MANUAL;
+    }
+  }
+  else if(btnState == BTN_LONG){
+    switch (state) {
+      case MANUAL:
+        myEnc.write(map(maxSpeed, 0, 255, 0, 4 * (NUM_LEDS))); //start at saved value
+        return AUTO;//OPT_SPEED;
+      case AUTO:
+        myEnc.write(map(maxSpeed, 0, 255, 0, 4 * (NUM_LEDS))); //start at saved value
+        return MANUAL;//OPT_SPEED;
+    }
+  }
+  else return MANUAL;
+}
+Logic g_logic;
+
+//=======Setup=======================================
+void setup() 
+{
+  g_sensor.Setup();
+  g_lcd.Setup();
+  g_vibrator.Setup();
+  g_logic.Setup();
+  g_leds.Setup();
+  delay(3000); // 3 second delay for recovery
+
+  Serial.begin(115200);
 }
 
 //=======LED Drawing Functions=================
@@ -563,251 +1028,52 @@ int encLimitRead(int minVal, int maxVal){
   return constrain(myEnc.read()/4,minVal,maxVal);
 }
 
-//=======Program Modes/States==================
-
-// Manual vibrator control mode (red), still shows orgasm closeness in background
-void run_manual() {
-  //In manual mode, only allow for 13 cursor positions, for adjusting motor speed.
-  const int knob = encLimitRead(0,NUM_LEDS-1);
-  motSpeed = map(knob, 0, NUM_LEDS - 1, 0., (float)MOT_MAX);
-
-  const auto setting = map_motspeed_to_vibrator();
-  if (setting >= 0)
-  {
-    vibrator_to(setting);
-  }
-
-  //gyrGraphDraw(avgPressure, 0, 4 * 3 * NUM_LEDS);
-  const int presDraw = map(constrain(pressure - avgPressure, 0, pLimit),0,pLimit,0,NUM_LEDS*3);
-  draw_bars_3(presDraw, CRGB::Green,CRGB::Yellow,CRGB::Red);
-  draw_cursor(knob, CRGB::Red);
-}
-
-// Automatic edging mode, knob adjust sensitivity.
-void run_auto() {
-  static float motIncrement = 0.0;
-  motIncrement = ((float)maxSpeed / ((float)FREQUENCY * (float)rampTimeS));
-
-  int knob = encLimitRead(0,(3*NUM_LEDS)-1);
-  sensitivity = knob*4; //Save the setting if we leave and return to this state
-  //Reverse "Knob" to map it onto a pressure limit, so that it effectively adjusts sensitivity
-  pLimit = map(knob, 0, 3 * (NUM_LEDS - 1), 600, 1); //set the limit of delta pressure before the vibrator turns off
-  if (pLimit != pLimitLast)
-  {
-    pLimitLast = pLimit;
-    lastTargetChange = millis();
-  }
-  //When someone clenches harder than the pressure limit
-  if (pressure - avgPressure > pLimit) {
-    if (motSpeed > 0.0f)
-    {
-      vibrator_off();
-      edgeCount++;
-      lastEdgeCountChange = millis();
-    }
-    motSpeed = -.5*(float)rampTimeS*((float)FREQUENCY*motIncrement);//Stay off for a while (half the ramp up time)
-    
-  }
-  else if (motSpeed < (float)maxSpeed) {
-    motSpeed += motIncrement;
-  }
-
-  const auto setting = map_motspeed_to_vibrator();
-  if (setting >= 0)
-  {
-    vibrator_to(setting);
-  }
-  
-  int presDraw = map(constrain(pressure - avgPressure, 0, pLimit), 0, pLimit, 0, NUM_LEDS * 3);
-  draw_bars_3(presDraw, CRGB::Green, CRGB::Yellow, CRGB::Red);
-  draw_cursor_3(knob, CRGB(50, 50, 200), CRGB::Blue, CRGB::Purple);
-}
-
-//Poll the knob click button, and check for long/very long presses as well
-uint8_t check_button(){
-  static bool lastBtn = ENC_SW_DOWN;
-  static unsigned long keyDownTime = 0;
-  uint8_t btnState = BTN_NONE;
-  bool thisBtn = digitalRead(ENC_SW);
-
-  //Detect single presses, no repeating, on keyup
-  if(thisBtn == ENC_SW_DOWN && lastBtn == ENC_SW_UP){
-    keyDownTime = millis();
-  }
-  
-  if (thisBtn == ENC_SW_UP && lastBtn == ENC_SW_DOWN) { //there was a keyup
-    if((millis()-keyDownTime) >= V_LONG_PRESS_MS){
-      btnState = BTN_V_LONG;
-    }
-    else if((millis()-keyDownTime) >= LONG_PRESS_MS){
-      btnState = BTN_LONG;
-      }
-    else{
-      btnState = BTN_SHORT;
-      }
-    }
-
-  lastBtn = thisBtn;
-  return btnState;
-}
-
-//run the important/unique parts of each state. Also, set button LED color.
-void run_state_machine(uint8_t state){
-  switch (state) {
-    case MANUAL:
-      run_manual();
-      break;
-    case AUTO:
-      run_auto();
-      break;
-    default:
-      run_manual();
-      break;
-  }
-}
-
-void run_lcd_status(uint8_t state)
+//typedef void (*ProfiledFunc)();
+using ProfiledFunc = void (*)();
+void profile(int storageID, ProfiledFunc profiledFunc)
 {
-  static int8_t mode = 0;
-  static auto lastChange = millis();
+  static uint8_t times[5]={0,0,0,0};
+  static uint8_t maxTime[5]={0,0,0,0};
+
   const auto now = millis();
+  profiledFunc();
+  const auto diff = millis()-now;
+  times[storageID] += diff;
+  times[storageID] /= 2;
+  maxTime[storageID] = max(maxTime[storageID], min(diff,255));
 
-  if ( (now - lastChange) > 5000 )
+  static uint32_t lastReport = now;
+  if (now > lastReport+1000)
   {
-    mode++;
-    lastChange = now;
-  }
-
-  if ( (now-lastTargetChange) < 15000 )
-  {
-    mode = 1;
-  }
-
-  if ( (now - lastEdgeCountChange) < 5000 )
-  {
-    mode = 2;
-  }
-  
-  switch (mode % 3)
-  {
-    case 0:
-      {
-        setLCDFunc(lcdfunc_renderPressure, avgPressure);
-      } break;
-    case 1:
-      {
-        setLCDFunc(lcdfunc_renderTarget, max(0, pressure - avgPressure), max(0, pLimit));
-      } break;
-    case 2:
+    lastReport = now;
+    Serial.println(F("== times =="));
+    for (auto i=0; i < 4; i++)
     {
-      setLCDFunc(lcdfunc_edgeCount, edgeCount);
-    } break;
-  }
-
-}
-
-//Switch between state machine states, and reset the encoder position as necessary
-//Returns the next state to run. Very long presses will turn the system off (sort of)
-uint8_t set_state(uint8_t btnState, uint8_t state){
-  if(btnState == BTN_NONE){
-    return state;
-  }
-  if(btnState == BTN_V_LONG){
-    //Turn the device off until woken up by the button
-    Serial.println(F("power off"));
-    fill_gradient_RGB(leds,0,CRGB::Black,NUM_LEDS-1,CRGB::Black);//Turn off LEDS
-    FastLED.show();
-    vibrator_off();
-    //analogWrite(MOTPIN, 0);
-    beep_motor(2093,1396,1047);
-    //analogWrite(MOTPIN, 0); //Turn Motor off
-    vibrator_off();
-    while(!digitalRead(ENC_SW))delay(1);
-    beep_motor(1047,1396,2093);
-    return MANUAL ;
-  }
-  else if(btnState == BTN_SHORT){
-    switch(state){
-      case MANUAL:
-        myEnc.write(sensitivity);//Whenever going into auto mode, keep the last sensitivity
-        motSpeed = 0; //Also reset the motor speed to 0
-        return AUTO;
-      case AUTO:
-        myEnc.write(0);//Whenever going into manual mode, set the speed to 0.
-        motSpeed = 0;
-        EEPROM.update(SENSITIVITY_ADDR, sensitivity);
-        return MANUAL;
+      Serial.print(F("["));
+      Serial.print(i);
+      Serial.print(F("] avg: "));
+      Serial.print(times[i]);
+      Serial.print(F(" max: "));
+      Serial.println(maxTime[i]);
     }
   }
-  else if(btnState == BTN_LONG){
-    switch (state) {
-      case MANUAL:
-        myEnc.write(map(maxSpeed, 0, 255, 0, 4 * (NUM_LEDS))); //start at saved value
-        return AUTO;//OPT_SPEED;
-      case AUTO:
-        myEnc.write(map(maxSpeed, 0, 255, 0, 4 * (NUM_LEDS))); //start at saved value
-        return MANUAL;//OPT_SPEED;
-    }
-  }
-  else return MANUAL;
 }
 
 //=======Main Loop=============================
-void loop() {
+void loop() 
+{
   static uint8_t state = MANUAL;
-  static int sampleTick = 0;
   static bool rendered = false;
-
-  //Run this section at the update frequency (default 60 Hz)
-  if (millis() % period == 0) {
-    delay(1);
-    
-    sampleTick++; //Add pressure samples to the running average slower than 60Hz
-    if (sampleTick % RA_TICK_PERIOD == 0) {
-      raPressure.addValue(pressure);
-      avgPressure = raPressure.getAverage();
-    }
-    
-    pressure=0;
-    for(uint8_t i=OVERSAMPLE; i; --i) {
-      pressure += analogRead(BUTTPIN);
-      if(i) {      // Don't delay after the last sample
-        delay(1);  // Spread samples out a little
-      }
-    }
-    fadeToBlackBy(leds,NUM_LEDS,20); //Create a fading light effect. LED buffer is not otherwise cleared
-    uint8_t btnState = check_button();
-    const auto newState = set_state(btnState,state); //Set the next state based on this state and button presses
-    if (newState != state)
-    { //state changed
-      if (state == AUTO)
-      {
-        //g_Storage.BeginSession();
-      }
-    }
-    run_state_machine(newState);
-    FastLED.show(); //Update the physical LEDs to match the buffer in software
-
-    //Alert that the Pressure voltage amplifier is railing, and the trim pot needs to be adjusted
-    if(pressure > 4030)beep_motor(2093,2093,2093); //Three high beeps
-
-    //Report pressure and motor data over USB for analysis / other uses. timestamps disabled by default
-    logDebug();
-
-    run_lcd_status(state);
-    rendered = false;
-  }
-  else if (!rendered)
-  {
-    if (lcdrender_activefunc != nullptr)
-    {
-      lcdrender_activefunc();
-      if (!u8g2.nextPage())
-      {
-        memset(&lcdrenderdata[0], 0, sizeof(lcdrenderdata));
-        lcdrender_activefunc = nullptr;
-      }
-      rendered = true;
-    }
-  }
+#if 0
+  profile(0, [](){ g_sensor.runCoroutine(); });
+  profile(1, [](){ g_logic.runCoroutine(); });
+  profile(2, [](){ g_lcd.runCoroutine(); });
+  profile(3, [](){ g_leds.runCoroutine(); });
+  profile(4, [](){ g_vibrator.runCoroutine(); });
+#endif
+  g_sensor.runCoroutine(); 
+  g_logic.runCoroutine();
+  g_lcd.runCoroutine();
+  g_leds.runCoroutine();
+  g_vibrator.runCoroutine();
 }
