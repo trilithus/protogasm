@@ -36,6 +36,7 @@ class CommandAssembler
     enum State
     {
       stateINVALID,
+      stateWaitMagic,
       stateGetCmdId,
       stateGetCmdLen,
       stateGetCmdContent,
@@ -50,11 +51,24 @@ class CommandAssembler
 
     uint8_t _cmdContentRecv = 0;
     Command* _newCmd = nullptr;
+
+    uint8_t _magic[4]{};
   public:
     void StartCommand() 
     { 
+        #if defined(CMD_DEBUG) && CMD_DEBUG==1
+          Serial.println("Begin CommandAssembler cmd");
+        #endif
         DeleteCommand(); 
         _state = stateGetCmdId; 
+        _cmdIdRecv = 0;
+        _cmdLenRecv = 0;
+        _cmdContentRecv = 0;
+    }
+    void ListenForCommand()
+    {
+        DeleteCommand(); 
+        _state = stateWaitMagic; 
         _cmdIdRecv = 0;
         _cmdLenRecv = 0;
         _cmdContentRecv = 0;
@@ -85,18 +99,30 @@ class CommandAssembler
     }
     void receiveByte(uint8_t byteValue)
     {
-      #if defined(CMD_DEBUG) && CMD_DEBUG==1
-      Serial.print("State: ");
-      #endif
-
-      if (_state == stateGetCmdId)
+      if (_state == stateWaitMagic)
       {
-        #if defined(CMD_DEBUG) && CMD_DEBUG==1
-        Serial.println("stateGetCmdId");
-        #endif
+        _magic[0] = _magic[1];
+        _magic[1] = _magic[2];
+        _magic[2] = _magic[3];
+        _magic[3] = byteValue;
+
+        if (_magic[0] == 0xDE &&
+            _magic[1] == 0xAD  && 
+            _magic[2] == 0xBE &&
+            _magic[3] == 0xEF)
+            {
+              StartCommand();
+            }
+
+      } else if (_state == stateGetCmdId)
+      {
         _cmdId  = byteValue;
         _cmdIdRecv++;
         _state = stateGetCmdLen;
+        #if defined(CMD_DEBUG) && CMD_DEBUG==1
+        Serial.print("stateGetCmdId: ");
+        Serial.println(_cmdId);
+        #endif
       }
       else if (_state == stateGetCmdLen)
       {
@@ -110,30 +136,40 @@ class CommandAssembler
         if (++_cmdLenRecv == sizeof(_cmdLen))
         {
           //Got length, assemble command:
+          #if defined(CMD_DEBUG) && CMD_DEBUG==1
+          Serial.print("cmdlen:");
+          Serial.println(_cmdLen);
+          #endif
           _state = stateGetCmdContent;
           this->CreateCommand(_cmdId, _cmdLen);
         }
         #endif
       } else if (_state == stateGetCmdContent)
       {
-        #if 0
         #if defined(CMD_DEBUG) && CMD_DEBUG==1
         Serial.println("stateGetCmdContent");
         #endif
-        #endif
         if (_newCmd == nullptr || _newCmd->GetBufferSize() == 0)
         {
+          #if defined(CMD_DEBUG) && CMD_DEBUG==1
+          Serial.println("Done");
+          #endif
           _state = stateCmdDone;
           return;  
         }
         uint8_t* buffer = reinterpret_cast<uint8_t*>(_newCmd->GetBuffer());
         buffer[_cmdContentRecv] = byteValue;
+#if defined(CMD_DEBUG) && CMD_DEBUG == 1
+        Serial.print("stateGetCmdContent recv: ");
+        Serial.print(_cmdContentRecv+1);
+        Serial.print("/");
+        Serial.println(_newCmd->GetBufferSize());
+#endif
         if (++_cmdContentRecv == _newCmd->GetBufferSize())
         {
           _state = stateCmdDone;
           return;
         }
-        
       }
     }
 private:

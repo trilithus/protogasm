@@ -1,3 +1,6 @@
+#pragma GCC push_options
+#pragma GCC optimize ("Os")
+
 // Protogasm Code, forked from Nogasm Code Rev. 3
 /* Drives a vibrator and uses changes in pressure of an inflatable buttplug
  * to estimate a user's closeness to orgasm, and turn off the vibrator
@@ -43,6 +46,8 @@
 #include "RunningAverageT.h"
 #include <Arduino.h>
 #include <AceRoutine.h>
+#include "commandmanager.h"
+#include "sharedcommands.h"
 using namespace ace_routine;
 
 //Running pressure average array length and update frequency
@@ -64,7 +69,7 @@ RunningAverageT<unsigned short, RA_FREQUENCY*RA_HIST_SECONDS> raPressure;
 #if 1
 #define font_13pt u8g2_font_6x13_tr
 #define font_24pt u8g2_font_inb24_mr 
-#define font_15pt u8g2_font_VCR_OSD_mr 
+#define font_15pt u8g2_font_6x13_tr 
 #define font_symbols u8g2_font_unifont_t_weather
 #else
 #define font_13pt u8g2_font_6x13_tr
@@ -72,8 +77,6 @@ RunningAverageT<unsigned short, RA_FREQUENCY*RA_HIST_SECONDS> raPressure;
 #define font_15pt u8g2_font_6x13_tr 
 #define font_symbols u8g2_font_unifont_t_weather
 #endif
-
-U8G2_SSD1306_128X32_UNIVISION_1_HW_I2C u8g2(U8G2_R0, /* reset=*/ U8X8_PIN_NONE);   // Adafruit ESP8266/32u4/ARM Boards + FeatherWing OLED
 
 //=======Hardware Setup===============================
 //LEDs
@@ -94,6 +97,7 @@ constexpr uint8_t PIN_VIBRATOR_ONOFF = 12;
 constexpr uint8_t PIN_VIBRATOR_DOWN = 8;
 constexpr uint8_t PIN_VIBRATOR_UP = 13;
 constexpr uint8_t VIBRATOR_PUSH_DELAY = 100;
+
 
 
 //Pressure Sensor Analog In
@@ -191,6 +195,23 @@ void logDebug()
 #endif
 }
 
+void logI2C(String& output)
+{
+  output = "";
+  output += (millis() / 1000.0); //Timestamp (s)
+  output += (F(","));
+  output += (motSpeed); //Motor speed (0-255)
+  output += (F(","));
+  output += (g_pressure); //(Original ADC value - 12 bits, 0-4095)
+  output += (F(","));
+  output += (avgPressure); //Running average of (default last 25 seconds) pressure
+  output += (F(","));
+  output += (g_pressure - avgPressure);
+  output += (F(","));
+  output += (pLimit);
+  output += (F(",\r\n"));
+}
+
 //=======EEPROM Addresses============================
 //128b available on teensy LC
 #define BEEP_ADDR         1
@@ -198,29 +219,247 @@ void logDebug()
 #define SENSITIVITY_ADDR  3
 //#define RAMPSPEED_ADDR    4 //For now, ramp speed adjustments aren't implemented
 
-//=======LCD logic=============================
-typedef void (*lcdrender_t)();
-static lcdrender_t lcdrender_activefunc = nullptr;
-union lcdrenderdata_t
+//=======Hardware Coroutines=========================
+class I2C : public Coroutine
 {
-  int32_t integer32;
-  const char* stringptr;
+    public:
+    void Setup();
+    void Update();
 
-  int32_t operator=(const int32_t arg) 
+    virtual int runCoroutine() override;
+    void SendI2CCommand(Command* cmd);
+} g_i2c;
+
+class Logic : Coroutine
+{
+  protected:
+    void run_auto();
+    void run_manual();
+    uint8_t check_button();
+    void run_state_machine(uint8_t state);
+    uint8_t set_state(uint8_t btnState, uint8_t state);
+  public:
+    void Setup();
+    void Update();
+
+    virtual int runCoroutine() override;
+  private:
+    static int sampleTick;
+} g_logic;
+
+class Sensor : Coroutine
+{
+public:
+    void Setup();
+    virtual int runCoroutine() override;
+} g_sensor;
+
+class Vibrator : Coroutine
+{
+  struct
   {
-    integer32 = arg;
-    return arg;
+    bool powered = false;
+    uint8_t mode = 0;
+  } _currentState, _targetState;
+  static constexpr uint8_t MAX_LEVEL = 6;
+  public:
+    void Setup();
+    void Update();
+    void vibrator_up();
+    void vibrator_down();
+    void vibrator_off();
+    void vibrator_on();
+    void vibrator_to(const int mode);
+    void set_vibrator_mode(int fromStrength, int toStrength);
+    int map_motspeed_to_vibrator();
+
+    virtual int runCoroutine() override;
+  protected:
+    int8_t getStateDiff() const 
+    { 
+        int8_t fromStrength = clamp(static_cast<int8_t>(_currentState.mode), 0, MAX_LEVEL);
+        int8_t toStrength = clamp(static_cast<int8_t>(_targetState.mode), 0, MAX_LEVEL);
+        return toStrength - fromStrength; 
+      }
+} g_vibrator;
+
+class LEDs : Coroutine
+{
+  public:
+    void Setup();
+    void Update();
+
+    virtual int runCoroutine() override 
+    {
+      COROUTINE_LOOP()
+      {
+        Update();
+        COROUTINE_YIELD();
+      }
+    }
+} g_leds;
+
+class LCD : public Coroutine
+{
+  private:
+    static U8G2_SSD1306_128X32_UNIVISION_1_HW_I2C u8g2;
+
+    typedef void (*lcdrender_t)();
+    static lcdrender_t lcdrender_activefunc;
+  protected:
+    void run_lcd_status(uint8_t state);
+  public:
+    void Setup();
+    void Update();
+    virtual int runCoroutine() override;
+
+    template <typename T, typename I, int idx = 0, typename... Iremainder>
+    static void setLCDFunc(T func, I arg, Iremainder... args);
+    static void lcdfunc_edgeCount();
+    static void lcdfunc_renderText();
+    static void lcdfunc_renderTarget();
+    static void lcdfunc_renderPressure();
+
+    static void RenderPanic(const char* _str);
+  public:
+    static unsigned long lastTargetChange;
+  private:
+    union lcdrenderdata_t
+    {
+      int32_t integer32;
+      const char *stringptr;
+
+      int32_t operator=(const int32_t arg)
+      {
+        integer32 = arg;
+        return arg;
+      }
+
+      const char *operator=(const char *arg)
+      {
+        stringptr = arg;
+        return arg;
+      }
+    } static lcdrenderdata[2];
+} g_lcd;
+LCD::lcdrenderdata_t LCD::lcdrenderdata[2]{};
+unsigned long LCD::lastTargetChange = millis();
+LCD::lcdrender_t LCD::lcdrender_activefunc = nullptr;
+U8G2_SSD1306_128X32_UNIVISION_1_HW_I2C LCD::u8g2(U8G2_R0, /* reset=*/ U8X8_PIN_NONE);
+
+
+/////////////////////////////////////////////////////
+// LCD
+int LCD::runCoroutine()
+{
+  COROUTINE_LOOP()
+  {
+    Update();
+    COROUTINE_YIELD();
+  }
+}
+
+void LCD::Setup()
+{
+  #if 0
+  u8g2.setI2CAddress(0x3C*2);
+  u8g2.setBusClock(12500);
+  Wire.setClock(12500);
+  #if 0
+  #if 0
+  u8g2.setBusClock(35);//200000);
+  //Wire.setTimeout(100);
+  Wire.setWireTimeout(50000, true);
+  #endif
+
+  Wire.setWireTimeout(10000, false);
+  #endif
+  #endif
+  u8g2.begin();
+
+  setLCDFunc(lcdfunc_renderText, __DATE__, __TIME__);
+  do {
+    lcdrender_activefunc();
+  } while( u8g2.nextPage() );
+  lcdrender_activefunc = nullptr;
+}
+
+void LCD::Update()
+{
+  //u8g2.setI2CAddress(0x3C*2);
+  if (lcdrender_activefunc != nullptr)
+  {
+    lcdrender_activefunc();
+    if (!u8g2.nextPage())
+    {
+      memset(&lcdrenderdata[0], 0, sizeof(lcdrenderdata));
+      lcdrender_activefunc = nullptr;
+    }
+  }
+  else
+  {
+    run_lcd_status(state);
+  }
+}
+
+void LCD::RenderPanic(const char* _str)
+{
+  LCD::setLCDFunc(LCD::lcdfunc_renderText, _str);
+  do
+  {
+    lcdrender_activefunc();
+  } while (u8g2.nextPage());
+  pinMode(LED_BUILTIN, OUTPUT);
+  while (true)
+  {
+    digitalWrite(LED_BUILTIN, HIGH);
+    delay(100);
+    digitalWrite(LED_BUILTIN, LOW);
+    delay(100);
+  }
+}
+
+void LCD::run_lcd_status(uint8_t state)
+{
+  static int8_t mode = 0;
+  static auto lastChange = millis();
+  const auto now = millis();
+
+  if ( (now - lastChange) > 5000 )
+  {
+    mode++;
+    lastChange = now;
   }
 
-  const char* operator =(const char* arg) 
+  if ( (now-lastTargetChange) < 15000 )
   {
-    stringptr = arg;
-    return arg;
+    mode = 1;
   }
-} lcdrenderdata[2]{};
 
-template<typename T, typename I, int idx=0, typename ...Iremainder>
-void setLCDFunc(T func, I arg, Iremainder... args)
+  if ( (now - lastEdgeCountChange) < 5000 )
+  {
+    mode = 2;
+  }
+  
+  switch (mode % 3)
+  {
+    case 0:
+      {
+        setLCDFunc(lcdfunc_renderPressure, avgPressure);
+      } break;
+    case 1:
+      {
+        setLCDFunc(lcdfunc_renderTarget, max(0, g_pressure - avgPressure), max(0, pLimit));
+      } break;
+    case 2:
+    {
+      setLCDFunc(lcdfunc_edgeCount, edgeCount);
+    } break;
+  }
+}
+
+template<typename T, typename I, int idx, typename ...Iremainder>
+void LCD::setLCDFunc(T func, I arg, Iremainder... args)
 {
   if (lcdrender_activefunc == nullptr)
   {
@@ -241,7 +480,7 @@ void setLCDFunc(T func, I arg, Iremainder... args)
 }
 
 //static auto lastPressureChange = millis();
-static void lcdfunc_renderPressure()
+void LCD::lcdfunc_renderPressure()
 {
   u8g2.setFont(font_13pt);
   u8g2.setCursor(0, 20);
@@ -251,8 +490,7 @@ static void lcdfunc_renderPressure()
   u8g2.print(lcdrenderdata[0].integer32);
 }
 
-static auto lastTargetChange = millis();
-static void lcdfunc_renderTarget()
+void LCD::lcdfunc_renderTarget()
 {
   u8g2.setFont(font_13pt);
   u8g2.setCursor(0, 20);
@@ -296,7 +534,7 @@ static void lcdfunc_renderTarget()
   u8g2.setDrawColor(1);
 }
 
-static void lcdfunc_renderText()
+void LCD::lcdfunc_renderText()
 {
   u8g2.setFont(font_13pt);
   int y = u8g2.getMaxCharHeight();
@@ -311,7 +549,7 @@ static void lcdfunc_renderText()
   }
 }
 
-static void lcdfunc_edgeCount()
+void LCD::lcdfunc_edgeCount()
 {
   u8g2.setFont(font_24pt);
   u8g2.setCursor(0, u8g2.getMaxCharHeight()-4);
@@ -339,197 +577,82 @@ static void lcdfunc_edgeCount()
 }
 
 /////////////////////////////////////////////////////
-// LCD
-
-class LCD : public Coroutine
-{
-  protected:
-    void run_lcd_status(uint8_t state);
-  public:
-    void Setup();
-    void Update();
-    virtual int runCoroutine() override 
-    {
-      COROUTINE_LOOP()
-      {
-        Update();
-        COROUTINE_YIELD();
-      }
-    }
-};
-
-void LCD::Setup()
-{
-  u8g2.begin();
-  setLCDFunc(lcdfunc_renderText, __DATE__, __TIME__);
-  do {
-    lcdrender_activefunc();
-  } while( u8g2.nextPage() );
-  lcdrender_activefunc = nullptr;
-}
-
-void LCD::Update()
-{
-  if (lcdrender_activefunc != nullptr)
-  {
-    lcdrender_activefunc();
-    if (!u8g2.nextPage())
-    {
-      memset(&lcdrenderdata[0], 0, sizeof(lcdrenderdata));
-      lcdrender_activefunc = nullptr;
-    }
-  }
-  else
-  {
-    run_lcd_status(state);
-  }
-}
-
-void LCD::run_lcd_status(uint8_t state)
-{
-  static int8_t mode = 0;
-  static auto lastChange = millis();
-  const auto now = millis();
-
-  if ( (now - lastChange) > 5000 )
-  {
-    mode++;
-    lastChange = now;
-  }
-
-  if ( (now-lastTargetChange) < 15000 )
-  {
-    mode = 1;
-  }
-
-  if ( (now - lastEdgeCountChange) < 5000 )
-  {
-    mode = 2;
-  }
-  
-  switch (mode % 3)
-  {
-    case 0:
-      {
-        setLCDFunc(lcdfunc_renderPressure, avgPressure);
-      } break;
-    case 1:
-      {
-        setLCDFunc(lcdfunc_renderTarget, max(0, g_pressure - avgPressure), max(0, pLimit));
-      } break;
-    case 2:
-    {
-      setLCDFunc(lcdfunc_edgeCount, edgeCount);
-    } break;
-  }
-}
-LCD g_lcd;
-/////////////////////////////////////////////////////
 // Vibrator
-class Vibrator : Coroutine
+int Vibrator::runCoroutine()
 {
-  struct
+  static int8_t i = 0;
+  static int8_t diff = 0;
+  COROUTINE_LOOP()
   {
-    bool powered = false;
-    uint8_t mode = 0;
-  } _currentState, _targetState;
-  static constexpr uint8_t MAX_LEVEL = 6;
-  public:
-    void Setup();
-    void Update();
-    void vibrator_up();
-    void vibrator_down();
-    void vibrator_off();
-    void vibrator_on();
-    void vibrator_to(const int mode);
-    void set_vibrator_mode(int fromStrength, int toStrength);
-    int map_motspeed_to_vibrator();
+    diff = getStateDiff();
 
-    virtual int runCoroutine() override 
+    if (_currentState.powered == false && _targetState.powered == true)
     {
-      static int8_t i=0;
-      static int8_t diff=0;
-      COROUTINE_LOOP()
+      //turn on:
+      _currentState.powered = true;
+      digitalWrite(PIN_VIBRATOR_ONOFF, HIGH);
+      COROUTINE_DELAY(VIBRATOR_PUSH_DELAY);
+      digitalWrite(PIN_VIBRATOR_ONOFF, LOW);
+      COROUTINE_DELAY(VIBRATOR_PUSH_DELAY);
+      Serial.println(F("[VIBRATOR]\tTurned on"));
+    }
+    else if (_currentState.powered == true && _targetState.powered == false)
+    {
+      //turn off:
+      _currentState.powered = false;
+      digitalWrite(PIN_VIBRATOR_ONOFF, HIGH);
+      COROUTINE_DELAY(VIBRATOR_PUSH_DELAY);
+      digitalWrite(PIN_VIBRATOR_ONOFF, LOW);
+      COROUTINE_DELAY(VIBRATOR_PUSH_DELAY);
+      Serial.println(F("[VIBRATOR]\tTurned off"));
+    }
+
+    if (_currentState.powered)
+    {
+      if (diff != 0)
       {
-        diff = getStateDiff();
-
-
-
-        if (_currentState.powered == false && _targetState.powered == true)
+        Serial.print(F("[VIBRATOR] "));
+        Serial.print(_currentState.mode);
+        Serial.print(F(" -> "));
+        Serial.println(_targetState.mode);
+      }
+      if (diff > 0)
+      {
+        for (i = 0; i < diff; i++)
         {
-          //turn on:
-          _currentState.powered = true;
-          digitalWrite(PIN_VIBRATOR_ONOFF, HIGH);
+          //turn up:
+          _currentState.mode++;
+          digitalWrite(PIN_VIBRATOR_UP, HIGH);
           COROUTINE_DELAY(VIBRATOR_PUSH_DELAY);
-          digitalWrite(PIN_VIBRATOR_ONOFF, LOW);
+          digitalWrite(PIN_VIBRATOR_UP, LOW);
           COROUTINE_DELAY(VIBRATOR_PUSH_DELAY);
-          Serial.println(F("[VIBRATOR]\tTurned on"));
-        } else if (_currentState.powered == true  && _targetState.powered == false)
+          Serial.println(F("[VIBRATOR]\tTurned UP"));
+        }
+      }
+      else if (diff < 0)
+      {
+        for (i = 0; i < -diff; i++)
         {
-          //turn off:
-          _currentState.powered = false;
-          digitalWrite(PIN_VIBRATOR_ONOFF, HIGH);
+          //turn down:
+          _currentState.mode--;
+          digitalWrite(PIN_VIBRATOR_DOWN, HIGH);
           COROUTINE_DELAY(VIBRATOR_PUSH_DELAY);
-          digitalWrite(PIN_VIBRATOR_ONOFF, LOW);
+          digitalWrite(PIN_VIBRATOR_DOWN, LOW);
           COROUTINE_DELAY(VIBRATOR_PUSH_DELAY);
-          Serial.println(F("[VIBRATOR]\tTurned off"));
+          Serial.println(F("[VIBRATOR]\tTurned DOWN"));
         }
-
-        if (_currentState.powered)
-        {        
-          if (diff != 0)
-          {
-            Serial.print(F("[VIBRATOR] "));
-            Serial.print(_currentState.mode);
-            Serial.print(F(" -> "));
-            Serial.println(_targetState.mode);
-          }
-          if (diff > 0)
-          {
-            for (i = 0; i < diff; i++)
-            {
-              //turn up:
-              _currentState.mode++;
-              digitalWrite(PIN_VIBRATOR_UP, HIGH);
-              COROUTINE_DELAY(VIBRATOR_PUSH_DELAY);
-              digitalWrite(PIN_VIBRATOR_UP, LOW);
-              COROUTINE_DELAY(VIBRATOR_PUSH_DELAY);
-              Serial.println(_currentState.mode);
-              Serial.println(F("[VIBRATOR]\tTurned UP"));
-            }
-          }
-          else if (diff < 0)
-          {
-            for (i = 0; i < -diff; i++)
-            {
-              //turn down:
-              _currentState.mode--;
-              digitalWrite(PIN_VIBRATOR_DOWN, HIGH);
-              COROUTINE_DELAY(VIBRATOR_PUSH_DELAY);
-              digitalWrite(PIN_VIBRATOR_DOWN, LOW);
-              COROUTINE_DELAY(VIBRATOR_PUSH_DELAY);
-              Serial.println(F("[VIBRATOR]\tTurned DOWN"));
-            }
-          }
-        }
-
-        COROUTINE_YIELD();
       }
     }
-  protected:
-    int8_t getStateDiff() const 
-    { 
-        int8_t fromStrength = clamp(static_cast<int8_t>(_currentState.mode), 0, MAX_LEVEL);
-        int8_t toStrength = clamp(static_cast<int8_t>(_targetState.mode), 0, MAX_LEVEL);
-        return toStrength - fromStrength; 
-      }
-};
+
+    COROUTINE_YIELD();
+  }
+}
 
 void Vibrator::Setup()
 {
-  pinMode(PIN_VIBRATOR_ONOFF, LOW);
-  pinMode(PIN_VIBRATOR_UP, LOW);
-  pinMode(PIN_VIBRATOR_DOWN, LOW);
+  pinMode(PIN_VIBRATOR_ONOFF, OUTPUT);
+  pinMode(PIN_VIBRATOR_UP, OUTPUT);
+  pinMode(PIN_VIBRATOR_DOWN, OUTPUT);
 
   //Make sure the motor is off
   vibrator_off();
@@ -602,26 +725,9 @@ int Vibrator::map_motspeed_to_vibrator()
     }
   }
   return -1;
-}
-static Vibrator g_vibrator;
-
+};
 /////////////////////////////////////////////////////
 // LEDs
-class LEDs : Coroutine
-{
-  public:
-    void Setup();
-    void Update();
-
-    virtual int runCoroutine() override 
-    {
-      COROUTINE_LOOP()
-      {
-        Update();
-        COROUTINE_YIELD();
-      }
-    }
-};
 
 void LEDs::Setup()
 {
@@ -634,14 +740,10 @@ void LEDs::Setup()
 void LEDs::Update()
 {
 }
-LEDs g_leds;
 
 /////////////////////////////////////////////////////
 // Sensor
-class Sensor : Coroutine
-{
-public:
-    void Setup()
+void Sensor::Setup()
     {
       analogReference(EXTERNAL);
       pinMode(BUTTPIN, INPUT); //default is 10 bit resolution (1024), 0-3.3
@@ -650,23 +752,11 @@ public:
       //Check memory, if size is 0, we failed to allocate...
       if (raPressure.getSize() == 0)
       {
-        setLCDFunc(lcdfunc_renderText, F("OUT OF MEM"));
-        do
-        {
-          lcdrender_activefunc();
-        } while (u8g2.nextPage());
-        pinMode(LED_BUILTIN, OUTPUT);
-        while (true)
-        {
-          digitalWrite(LED_BUILTIN, HIGH);
-          delay(100);
-          digitalWrite(LED_BUILTIN, LOW);
-          delay(100);
-        }
+        LCD::RenderPanic(reinterpret_cast<const char*>(F("OUT OF MEM")));
       }
     }
 
-    virtual int runCoroutine() override 
+    int Sensor::runCoroutine() 
     {
       static auto s_lastTime = micros();
       static uint32_t s_tick = 0;
@@ -725,24 +815,12 @@ public:
         COROUTINE_YIELD();
       }
     }
-};
-Sensor g_sensor;
 
 /////////////////////////////////////////////////////
 // Logic
-class Logic : Coroutine
-{
-  protected:
-    void run_auto();
-    void run_manual();
-    uint8_t check_button();
-    void run_state_machine(uint8_t state);
-    uint8_t set_state(uint8_t btnState, uint8_t state);
-  public:
-    void Setup();
-    void Update();
+int Logic::sampleTick = 0;
 
-    virtual int runCoroutine() override 
+int Logic::runCoroutine()
     {
       COROUTINE_LOOP()
       {       
@@ -750,18 +828,20 @@ class Logic : Coroutine
         static uint8_t l_btnState = 0;
         l_btnState = check_button();
 
-        static auto l_newState = 0;
+        static auto l_newState = state;
         l_newState = set_state(l_btnState,state); //Set the next state based on this state and button presses
 
         if (l_newState != state)
         { //state changed
-          if (state == AUTO)
+          state = l_newState;
+          if (state == AUTO || state == MANUAL)
           {
-            //g_Storage.BeginSession();
+            SessionBeginEndCmd cmd;
+            cmd.SetValue((state == AUTO) ? true : false);
+            g_i2c.SendI2CCommand(&cmd);
           }
         }
         run_state_machine(l_newState);
-        state = l_newState;
         FastLED.show(); //Update the physical LEDs to match the buffer in software
 
         //Alert that the Pressure voltage amplifier is railing, and the trim pot needs to be adjusted
@@ -769,10 +849,6 @@ class Logic : Coroutine
         COROUTINE_YIELD();
       }
     }
-  private:
-    static int sampleTick;
-};
-int Logic::sampleTick = 0;
 
 void Logic::Setup()
 {
@@ -833,7 +909,7 @@ void Logic::run_auto()
   if (pLimit != pLimitLast)
   {
     pLimitLast = pLimit;
-    lastTargetChange = millis();
+    LCD::lastTargetChange = millis();
   }
   //When someone clenches harder than the pressure limit
   if (g_pressure - avgPressure > pLimit) {
@@ -871,27 +947,37 @@ void Logic::run_auto()
 //Poll the knob click button, and check for long/very long presses as well
 uint8_t Logic::check_button()
 {
-  static bool lastBtn = ENC_SW_DOWN;
+  static uint8_t btnState = BTN_NONE;
+  btnState = BTN_NONE;
+
+  static bool lastBtn = ENC_SW_UP;
   static unsigned long keyDownTime = 0;
-  uint8_t btnState = BTN_NONE;
-  bool thisBtn = digitalRead(ENC_SW);
+  static bool thisBtn = 0;
+  thisBtn = digitalRead(ENC_SW);
 
   //Detect single presses, no repeating, on keyup
   if(thisBtn == ENC_SW_DOWN && lastBtn == ENC_SW_UP){
     keyDownTime = millis();
   }
-  
-  if (thisBtn == ENC_SW_UP && lastBtn == ENC_SW_DOWN) { //there was a keyup
-    if((millis()-keyDownTime) >= V_LONG_PRESS_MS){
+
+  if (thisBtn == ENC_SW_UP && lastBtn == ENC_SW_DOWN)
+  { //there was a keyup
+    if ((millis() - keyDownTime) >= V_LONG_PRESS_MS)
+    {
       btnState = BTN_V_LONG;
+      keyDownTime = 0;
     }
-    else if((millis()-keyDownTime) >= LONG_PRESS_MS){
+    else if ((millis() - keyDownTime) >= LONG_PRESS_MS)
+    {
       btnState = BTN_LONG;
-      }
-    else{
-      btnState = BTN_SHORT;
-      }
+      keyDownTime = 0;
     }
+    else
+    {
+      btnState = BTN_SHORT;
+      keyDownTime = 0;
+    }
+  }
 
   lastBtn = thisBtn;
   return btnState;
@@ -959,19 +1045,93 @@ uint8_t Logic::set_state(uint8_t btnState, uint8_t state)
   }
   else return MANUAL;
 }
-Logic g_logic;
 
-//=======Setup=======================================
-void setup() 
+// I2C
+
+void I2C::Setup()
 {
-  g_sensor.Setup();
-  g_lcd.Setup();
-  g_vibrator.Setup();
-  g_logic.Setup();
-  g_leds.Setup();
-  delay(3000); // 3 second delay for recovery
+  pinMode(11, OUTPUT);
+  digitalWrite(11, LOW);
+  Wire.begin();
+  Wire.setClock(3400000);
+  //pinMode(11, LOW);
+  //Wire.setTimeout(1000);
+  //Wire.setWireTimeout(1000, false);
+}
 
-  Serial.begin(115200);
+void I2C::Update()
+{
+}
+
+int I2C::runCoroutine()
+{
+  #if 1
+  COROUTINE_LOOP()
+  {
+    COROUTINE_DELAY(250);
+    static String i2cstring;
+    logI2C(i2cstring);
+
+    static PrintCmd *cmd = nullptr;
+    cmd = new PrintCmd();
+    if (cmd != nullptr)
+    {
+      cmd->SetString(i2cstring.c_str());
+      i2cstring = "";
+      g_i2c.SendI2CCommand(cmd);
+
+      delete (cmd);
+      cmd = nullptr;
+    }
+    else
+    {
+      Serial.println(F("Out of Memory!"));
+    }
+    COROUTINE_YIELD();
+  }
+  #endif
+}
+
+void I2C::SendI2CCommand(Command* cmd)
+{
+  #define I2C_PROTOCOL 1
+
+  #if defined(I2C_PROTOCOL) && I2C_PROTOCOL==0
+  //Request a data to allow the logger to be ready, and then make sure
+  //we wait.
+  //Wire.setClock(35);
+  Wire.requestFrom(0x43, 1);
+  while(Wire.available())
+  {
+    Serial.println(Wire.read());
+  }
+  #endif
+
+  //Start submitting the command:
+  //Wire.setClock(16000000);
+  Wire.setClock(3400000);
+  digitalWrite(11, HIGH);
+  Wire.beginTransmission(0x43); /* begin with device address 8 */
+  int32_t sz = cmd->GetBufferSize();
+  #if defined(I2C_PROTOCOL) && I2C_PROTOCOL==1
+  Wire.write(0xDEul);
+  Wire.write(0xADul);
+  Wire.write(0xBEul);
+  Wire.write(0xEFul);
+  #endif
+  Wire.write(static_cast<unsigned int>(cmd->cmdId));
+  Wire.write(reinterpret_cast<const uint8_t*>(&sz), sizeof(sz));
+  Wire.endTransmission(); 
+  const uint8_t* buffer = reinterpret_cast<const uint8_t*>(cmd->GetBuffer());
+  do
+  {
+    Wire.beginTransmission(0x43); 
+    uint8_t written = Wire.write(buffer, clamp(sz, 0, 10));
+    sz -= written;
+    buffer += written;
+    Wire.endTransmission();    /* stop transmitting */
+  } while(sz>0);
+  digitalWrite(11, LOW);
 }
 
 //=======LED Drawing Functions=================
@@ -1032,9 +1192,9 @@ int encLimitRead(int minVal, int maxVal){
 using ProfiledFunc = void (*)();
 void profile(int storageID, ProfiledFunc profiledFunc)
 {
-  static uint8_t times[5]={0,0,0,0};
-  static uint8_t maxTime[5]={0,0,0,0};
-
+  static constexpr uint8_t profilecount = 6;
+  static uint8_t times[profilecount]={};
+  static uint8_t maxTime[profilecount]={};
   const auto now = millis();
   profiledFunc();
   const auto diff = millis()-now;
@@ -1047,7 +1207,7 @@ void profile(int storageID, ProfiledFunc profiledFunc)
   {
     lastReport = now;
     Serial.println(F("== times =="));
-    for (auto i=0; i < 4; i++)
+    for (auto i=0; i < profilecount; i++)
     {
       Serial.print(F("["));
       Serial.print(i);
@@ -1057,6 +1217,22 @@ void profile(int storageID, ProfiledFunc profiledFunc)
       Serial.println(maxTime[i]);
     }
   }
+}
+
+//=======Setup=======================================
+void setup() 
+{
+  Wire.setWireTimeout(50000, true);
+
+  Serial.begin(115200); delay(100); Serial.println(F("Serial up")); Serial.flush();
+  g_sensor.Setup();  delay(100); Serial.println(F("Sensor up")); Serial.flush();
+  g_logic.Setup();  delay(100); Serial.println(F("Logic up")); Serial.flush();
+  g_lcd.Setup();  delay(100); Serial.println(F("LCD up")); Serial.flush();
+  g_leds.Setup();  delay(100); Serial.println(F("LEDS up")); Serial.flush();
+  g_vibrator.Setup();  delay(100); Serial.println(F("Vibrator up")); Serial.flush();
+  g_i2c.Setup();  delay(100); Serial.println(F("i2C up")); Serial.flush();
+  
+  Serial.println("Started up");
 }
 
 //=======Main Loop=============================
@@ -1070,10 +1246,13 @@ void loop()
   profile(2, [](){ g_lcd.runCoroutine(); });
   profile(3, [](){ g_leds.runCoroutine(); });
   profile(4, [](){ g_vibrator.runCoroutine(); });
-#endif
+  profile(5, [](){ g_i2c.runCoroutine(); });
+#else
   g_sensor.runCoroutine(); 
   g_logic.runCoroutine();
   g_lcd.runCoroutine();
   g_leds.runCoroutine();
   g_vibrator.runCoroutine();
+  g_i2c.runCoroutine();
+#endif
 }
