@@ -53,7 +53,7 @@ echo("wide", wide + roundR*2); // total wide
 pcbWide=53.3;
 pcbLenght=68.58;
 pcbHeight=1.64;
-usbHolePosition=38.1;
+usbHolePosition=38.1 + 2;
 usbHeight=10.8 + 2;
 usbWide=11.43 + 2;
 powerJackPosition=7.62;
@@ -62,3 +62,5 @@ powerJackHeight=10.8 +2;
 
 pcbPositionX = width/2 + roundR - layerWidth*7 - gap*4;
 pcbPositionZ = 2.5;
+
+is_dummy = true;

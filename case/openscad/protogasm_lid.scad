@@ -5,6 +5,8 @@
 //  http://creativecommons.org/licenses/by-sa/3.0/
 //  or send a letter to Creative Commons, PO Box 1866, Mountain View, CA 94042, USA.
 
+//include <protogasm_param.scad>
+is_dummy = false;
 
 //------------------------------------------------------------------------- SHARED PARAMETERS
 $fn=100; // resolution
@@ -22,7 +24,7 @@ screwHead = 6; // screw head hole diameter
 
 gap = layerHeight/2;
 
-floorHeight = 1.8; // 6*0.25 layer + 0.3 first layer
+floorHeight = !is_dummy ? 1.8 : 3.8; // 6*0.25 layer + 0.3 first layer
 
 height = 20.6; // case height
 innerHeight = height - floorHeight*2;
@@ -65,21 +67,34 @@ pcbPositionZ = 2.5;
 
 extra_headroom = 9.36;
 
-knob_position = [-1.27,0,0];
+knob_position = [-1.27,0];
+
+//translate([0, 0, height])
+//
 
 //------------------------------------------------------------------------- MAIN BLOCK
+rotate([0,180,0])
+translate([0,0,-height])
 difference()
 {
 																		// ADD
 	union()
 	{
-		// Add Base
-		linear_extrude(height = height/2 + blockLockSize + extra_headroom, convexity = 10)
-		minkowski()
-		{									
-			square([width, wide], center = true);
-			circle(roundR);
-		}
+        if (!is_dummy || false)
+        {
+            // Add Base
+            linear_extrude(height = height/2 + blockLockSize + extra_headroom, convexity = 10)
+            minkowski()
+            {									
+                square([width, wide], center = true);
+                circle(roundR);
+            }
+        }
+        else
+        {
+            h=(height/2 + blockLockSize + extra_headroom);
+            translate([0,0,height/2]) cube([width+(roundR*2), wide + (2*roundR), h], true);
+        }
 	}
 																		// SUBSTRACT
 	union()
@@ -94,14 +109,19 @@ difference()
 				square([width, wide], center = true);
 				circle(roundR - pillarSize);
 			}
+            
 			// Cut block lock
-			translate([0, 0, height/2 - blockLockSize + extra_headroom])
-			linear_extrude(height = height + extra_headroom, convexity = 10)
-			minkowski()
-			{
-				square([width, wide], center = true);
-				circle(roundR - layerWidth*3);
-			}
+            if (!is_dummy || false)
+            {
+                translate([0, 0, height/2 - blockLockSize + extra_headroom])
+                linear_extrude(height = height + extra_headroom, convexity = 10)
+                minkowski()
+                {
+                    square([width, wide], center = true);
+                    circle(roundR - layerWidth*3);
+                }
+            }
+            
 			// Cut x panels 
 			for (i = [0 : 180 : 180])				
 			rotate([0, 0, i])
@@ -111,23 +131,26 @@ difference()
 				translate([0, 0, (height+extra_headroom)/2 ])
 				cube([pillarSize, sidePanelXWidth, height + extra_headroom], center=true);
 
-				// Cut X, Y srew holes
-				for (i = [wide/2, -wide/2])
-				{
-					translate([-(roundR - pillarSize/2 - layerWidth*7), i, 0])
-					if (i>0) 
-					{
-						rotate([0, 0, 45])
-						translate([screwHoleRoundR, 0, 0])
-						cylinder(h=height/2 + extra_headroom, r=verConnectionHoleR);
-					}
-					else
-					{
-						rotate([0, 0, -45])
-						translate([screwHoleRoundR, 0, 0])
-						cylinder(h=height/2 + extra_headroom, r=verConnectionHoleR);
-					}
-				}
+                if (!is_dummy || false)
+                {
+                    // Cut X, Y srew holes
+                    for (i = [wide/2, -wide/2])
+                    {
+                        translate([-(roundR - pillarSize/2 - layerWidth*7), i, 0])
+                        if (i>0) 
+                        {
+                            rotate([0, 0, 45])
+                            translate([screwHoleRoundR, 0, 0])
+                            cylinder(h=height/2 + extra_headroom, r=verConnectionHoleR);
+                        }
+                        else
+                        {
+                            rotate([0, 0, -45])
+                            translate([screwHoleRoundR, 0, 0])
+                            cylinder(h=height/2 + extra_headroom, r=verConnectionHoleR);
+                        }
+                    }
+                }
 			}
 			// Cut Y panels 
 			for (i = [90 : 180 : 270])
@@ -155,20 +178,37 @@ difference()
 				
 			}
 		}
+        
 		//Knob hole
-		translate(knob_position)
-		cylinder(h=20, r = 8/2, center=true);
-
+        if (!is_dummy || false)
+        {
+            translate(knob_position)
+            cylinder(h=20, r = 8/2, center=true);
+            
+            translate([17.5,0,0])
+            cube([11.5, 28, 20], true);
+            
+            translate([17.5,0,2])
+            cube([12.5, 38, 2], true);
+        }
 	}
+    
 }
 
+rotate([0,180,0])
+translate([0,0,-height])
 difference() {
-	// Knob boss
-	translate(knob_position)
-	cylinder(h = floorHeight + 2, r=12/2);
+    if (!is_dummy)
+    {
+        // Knob boss
+        translate(knob_position)
+        cylinder(h = floorHeight + 2, r=12/2);
+    }
 
-		//Knob hole
-		translate(knob_position)
-		cylinder(h=20, r = 8/2, center=true);
-
+    if (!is_dummy)
+    {
+        //Knob hole
+        translate(knob_position)
+        cylinder(h=20, r = 8/2, center=true);
+    }
 }
