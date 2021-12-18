@@ -1,5 +1,6 @@
 #pragma GCC push_options
 #pragma GCC optimize ("Os")
+//#define CMD_DEBUG 1
 
 // Protogasm Code, forked from Nogasm Code Rev. 3
 /* Drives a vibrator and uses changes in pressure of an inflatable buttplug
@@ -48,6 +49,7 @@
 #include <AceRoutine.h>
 #include "commandmanager.h"
 #include "sharedcommands.h"
+#include <avr/pgmspace.h>
 using namespace ace_routine;
 
 //Running pressure average array length and update frequency
@@ -70,7 +72,6 @@ RunningAverageT<unsigned short, RA_FREQUENCY*RA_HIST_SECONDS> raPressure;
 #define font_13pt u8g2_font_6x13_tr
 #define font_24pt u8g2_font_inb24_mr 
 #define font_15pt u8g2_font_6x13_tr 
-#define font_symbols u8g2_font_unifont_t_weather
 #else
 #define font_13pt u8g2_font_6x13_tr
 #define font_24pt u8g2_font_6x13_tr 
@@ -84,7 +85,7 @@ RunningAverageT<unsigned short, RA_FREQUENCY*RA_HIST_SECONDS> raPressure;
 #define LED_PIN 10
 #define LED_TYPE    WS2812B
 #define COLOR_ORDER GRB
-#define BRIGHTNESS 10 //Subject to change, limits current that the LEDs draw
+#define BRIGHTNESS 75 //Subject to change, limits current that the LEDs draw
 
 //Encoder
 #define ENC_SW   5 //Pushbutton on the encoder
@@ -98,7 +99,8 @@ constexpr uint8_t PIN_VIBRATOR_DOWN = 8;
 constexpr uint8_t PIN_VIBRATOR_UP = 13;
 constexpr uint8_t VIBRATOR_PUSH_DELAY = 100;
 
-
+//Storage
+#define I2C_PROTOCOL 0
 
 //Pressure Sensor Analog In
 #define BUTTPIN A0
@@ -222,12 +224,18 @@ void logI2C(String& output)
 //=======Hardware Coroutines=========================
 class I2C : public Coroutine
 {
-    public:
+  public:
     void Setup();
     void Update();
 
     virtual int runCoroutine() override;
     void SendI2CCommand(Command* cmd);
+
+    uint32_t GetLastPingValue() const {return _lastPingValue; }
+    unsigned long GetLastPing() const { return _lastPing; }
+  private:
+    uint32_t _lastPingValue = 0;
+    unsigned long _lastPing = 0;
 } g_i2c;
 
 class Logic : Coroutine
@@ -549,31 +557,69 @@ void LCD::lcdfunc_renderText()
   }
 }
 
-void LCD::lcdfunc_edgeCount()
+namespace bitmaps
 {
-  u8g2.setFont(font_24pt);
-  u8g2.setCursor(0, u8g2.getMaxCharHeight()-4);
+  static const uint8_t heart_bits[] PROGMEM = {
+      0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x60, 0x0c, 0xf8, 0x3e, 0xf8, 0x3f,
+      0xf8, 0x3f, 0xf8, 0x3f, 0xf8, 0x3f, 0xf0, 0x1f, 0xc0, 0x07, 0x80, 0x03,
+      0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
 
-  u8g2.setFont(font_13pt);
-  u8g2.print(F("EDGES "));
-  
-  u8g2.setFont(font_24pt);
-  u8g2.print(lcdrenderdata[0].integer32);
+  static const unsigned char heart_bits_crossed[] PROGMEM = {
+      0x01, 0x00, 0x02, 0x80, 0x04, 0x40, 0x68, 0x2c, 0x98, 0x32, 0x28, 0x29,
+      0x48, 0x24, 0x88, 0x22, 0x18, 0x21, 0xb0, 0x12, 0x40, 0x04, 0xa0, 0x0a,
+      0x10, 0x11, 0x08, 0x20, 0x04, 0x40, 0x02, 0x80};
 
-  if(motSpeed < 0.01f)
+  static const unsigned char connected_bits[] PROGMEM = {
+      0x00, 0x00, 0xf0, 0x07, 0xf0, 0x07, 0xf0, 0x03, 0x30, 0x00, 0xb0, 0x07,
+      0xbf, 0xff, 0xff, 0xff, 0xbf, 0xff, 0xb0, 0x07, 0x30, 0x00, 0xf0, 0x03,
+      0xf0, 0x03, 0xf0, 0x03, 0x00, 0x00, 0x00, 0x00};
+}
+
+  void LCD::lcdfunc_edgeCount()
   {
-    constexpr char symbol[2] = {32 + 12, 0x00};
-    u8g2.setFont(font_symbols);
-    u8g2.setCursor(u8g2.getDisplayWidth() - u8g2.getMaxCharWidth() - 4, u8g2.getMaxCharHeight()+8);
-    u8g2.print(symbol);
-  }
-  else 
+    u8g2.setFont(font_24pt);
+    u8g2.setCursor(0, u8g2.getMaxCharHeight() - 4);
+
+    u8g2.setFont(font_13pt);
+    u8g2.print(F("EDGES "));
+
+    u8g2.setFont(font_24pt);
+    u8g2.print(lcdrenderdata[0].integer32);
+
+  #define heart_width  16
+  #define heart_height 16
+  #if 1
+
+  static constexpr uint8_t buffersz = max(max(sizeof(bitmaps::connected_bits), sizeof(bitmaps::heart_bits)),
+                                                                       sizeof(bitmaps::heart_bits_crossed));
+  static uint8_t* buffer = (uint8_t*)malloc(buffersz);
+
+  //vibe active or not:
+  for(uint8_t i=0; i < sizeof(bitmaps::heart_bits); i++)
   {
-    constexpr char symbol[2] = {32 + 13, 0x00};
-    u8g2.setFont(font_symbols);
-    u8g2.setCursor(u8g2.getDisplayWidth() - u8g2.getMaxCharWidth() - 4, u8g2.getMaxCharHeight()+8);
-    u8g2.print(symbol);    
+    buffer[i] = pgm_read_byte_near((motSpeed >= 0.01f ? bitmaps::heart_bits : bitmaps::heart_bits_crossed) +i);
   }
+  u8g2.drawXBM(u8g2.getDisplayWidth() - heart_width, 0, heart_width, heart_height, buffer);
+
+  if (millis() < g_i2c.GetLastPing()+1000 && g_i2c.GetLastPingValue()>0)
+  {
+    for(uint8_t i=0; i < sizeof(bitmaps::connected_bits); i++)
+    {
+      buffer[i] = pgm_read_byte_near(bitmaps::connected_bits + i);
+    }
+    u8g2.drawXBM(u8g2.getDisplayWidth() - heart_width, heart_height, heart_width, heart_height, buffer);
+  }
+
+  //free(buffer);
+  #else
+  #define heart_width  16
+  #define heart_height 16
+  static unsigned char heart_bits[] = {
+  0x00,0x00,0x00,0x00,0x00,0x00,0x60,0x0c,0xf8,0x3e,0xf8,0x3f,
+  0xf8,0x3f,0xf8,0x3f,0xf8,0x3f,0xf0,0x1f,0xc0,0x07,0x80,0x03,
+  0x00,0x01,0x00,0x00,0x00,0x00,0x00,0x00};
+  u8g2.drawXBM(u8g2.getDisplayWidth() - heart_width, 0, heart_width, heart_height, &heart_bits[0]);
+  #endif
 }
 
 /////////////////////////////////////////////////////
@@ -1094,23 +1140,26 @@ int I2C::runCoroutine()
 
 void I2C::SendI2CCommand(Command* cmd)
 {
-  #define I2C_PROTOCOL 1
-
+  digitalWrite(11, HIGH);
   #if defined(I2C_PROTOCOL) && I2C_PROTOCOL==0
   //Request a data to allow the logger to be ready, and then make sure
   //we wait.
   //Wire.setClock(35);
-  Wire.requestFrom(0x43, 1);
+  Wire.setClock(3400000);
+  auto wired = Wire.requestFrom(0x43, 1);
+  if (wired == 0)
+  {
+    return;
+  }
   while(Wire.available())
   {
-    Serial.println(Wire.read());
+    _lastPingValue = Wire.read();
+    _lastPing = millis();
   }
   #endif
 
   //Start submitting the command:
   //Wire.setClock(16000000);
-  Wire.setClock(3400000);
-  digitalWrite(11, HIGH);
   Wire.beginTransmission(0x43); /* begin with device address 8 */
   int32_t sz = cmd->GetBufferSize();
   #if defined(I2C_PROTOCOL) && I2C_PROTOCOL==1
@@ -1224,7 +1273,7 @@ void setup()
 {
   Wire.setWireTimeout(50000, true);
 
-  Serial.begin(115200); delay(100); Serial.println(F("Serial up")); Serial.flush();
+  Serial.begin(230400); delay(100); Serial.println(F("Serial up")); Serial.flush();
   g_sensor.Setup();  delay(100); Serial.println(F("Sensor up")); Serial.flush();
   g_logic.Setup();  delay(100); Serial.println(F("Logic up")); Serial.flush();
   g_lcd.Setup();  delay(100); Serial.println(F("LCD up")); Serial.flush();

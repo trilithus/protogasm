@@ -1,6 +1,9 @@
 #pragma once
 #include "commandmanager.h"
 ////////////////////////////////////////////////////////////////////////////
+//DO NOT DEOPTIMIZE HERE!!!
+//#pragma GCC push_options
+//#pragma GCC optimize ("O0")
 
 enum class CommandID : uint8_t
 {
@@ -49,7 +52,7 @@ class SessionBeginEndCmd : public Command
   SessionBeginEndCmd() { cmdId = static_cast<uint8_t>(CommandID::SessionBeginEnd); };
   void SetValue(bool value) 
   {
-    AllocateBuffer(1);
+    AllocateBuffer(sizeof(uint32_t));
     ptr[0]=value?1:0; 
   }
 
@@ -57,7 +60,7 @@ class SessionBeginEndCmd : public Command
   {
   }
 protected:
-  uint8_t* &ptr = reinterpret_cast<uint8_t*&>(_buffer);
+  uint32_t* &ptr = reinterpret_cast<uint32_t*&>(_buffer);
 };
 
 struct

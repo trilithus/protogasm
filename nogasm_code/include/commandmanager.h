@@ -1,6 +1,14 @@
 #pragma once
 
-//#define CMD_DEBUG 1
+#ifndef DEBUG_MSG
+#ifdef DEBUG_ESP_PORT
+#define DEBUG_MSG(msg) DEBUG_ESP_PORT.print((const char*)msg)
+#define DEBUG_MSGF(fmt, ...) DEBUG_ESP_PORT.printf((const char*)fmt,  __VA_ARGS__ )
+#else
+#define DEBUG_MSG(...)
+#define DEBUG_MSGF(...)
+#endif
+#endif
 
 //command system:
 class Command
@@ -12,15 +20,26 @@ public:
 protected:
   uint32_t _bufferSz{};
   void* _buffer = nullptr;
+  void* _rawbuffer = nullptr;
 
   void AllocateBuffer(const uint32_t bufferSize) { 
     if (_buffer != nullptr) ReleaseBuffer();
-    _buffer = malloc(bufferSize);
+    _rawbuffer = malloc(bufferSize+3);
+    if ((uintptr_t)_rawbuffer%4 != 0)
+    {
+      DEBUG_MSG("UNALLIGNED!!\n");
+      _buffer = reinterpret_cast<void*>((uintptr_t)_rawbuffer + (4-(uintptr_t)_rawbuffer%4) );
+    }
+    else
+    {
+      _buffer = _rawbuffer;
+    }
     _bufferSz = bufferSize;
   }
   void ReleaseBuffer()
   {
-    if (_buffer != nullptr) free(_buffer);
+    if (_buffer != nullptr) free(_rawbuffer);
+    _rawbuffer = nullptr;
     _buffer = nullptr;
   }
 public:
@@ -57,13 +76,16 @@ class CommandAssembler
     void StartCommand() 
     { 
         #if defined(CMD_DEBUG) && CMD_DEBUG==1
-          Serial.println("Begin CommandAssembler cmd");
+        DEBUG_MSG(F("Begin CommandAssembler cmd\n"));
         #endif
         DeleteCommand(); 
         _state = stateGetCmdId; 
         _cmdIdRecv = 0;
         _cmdLenRecv = 0;
         _cmdContentRecv = 0;
+        #if defined(CMD_DEBUG) && CMD_DEBUG==1
+        DEBUG_MSG(F("Begin CommandAssembler cmd\n"));
+        #endif
     }
     void ListenForCommand()
     {
@@ -91,7 +113,7 @@ class CommandAssembler
         if (_newCmd != nullptr)
         {
             #if defined(CMD_DEBUG) && CMD_DEBUG==1
-            Serial.println("Deleting CommandAssembler cmd");
+            DEBUG_MSG(F("Deleting CommandAssembler cmd\n"));
             #endif
             delete(_newCmd);
             _newCmd = nullptr;
@@ -120,15 +142,14 @@ class CommandAssembler
         _cmdIdRecv++;
         _state = stateGetCmdLen;
         #if defined(CMD_DEBUG) && CMD_DEBUG==1
-        Serial.print("stateGetCmdId: ");
-        Serial.println(_cmdId);
+        DEBUG_MSGF(F("stateGetCmdId: %d\n"), _cmdId);
         #endif
       }
       else if (_state == stateGetCmdLen)
       {
         #if 1
         #if defined(CMD_DEBUG) && CMD_DEBUG==1
-        Serial.println("stateGetCmdLen");
+        DEBUG_MSG(F("stateGetCmdLen\n"));
         #endif
         uint8_t* buffer = reinterpret_cast<uint8_t*>(&_cmdLen);
         buffer[_cmdLenRecv] = byteValue;
@@ -137,8 +158,7 @@ class CommandAssembler
         {
           //Got length, assemble command:
           #if defined(CMD_DEBUG) && CMD_DEBUG==1
-          Serial.print("cmdlen:");
-          Serial.println(_cmdLen);
+          DEBUG_MSGF("cmdlen: %d\n", _cmdLen);
           #endif
           _state = stateGetCmdContent;
           this->CreateCommand(_cmdId, _cmdLen);
@@ -147,12 +167,12 @@ class CommandAssembler
       } else if (_state == stateGetCmdContent)
       {
         #if defined(CMD_DEBUG) && CMD_DEBUG==1
-        Serial.println("stateGetCmdContent");
+        DEBUG_MSG(F("stateGetCmdContent\n"));
         #endif
         if (_newCmd == nullptr || _newCmd->GetBufferSize() == 0)
         {
           #if defined(CMD_DEBUG) && CMD_DEBUG==1
-          Serial.println("Done");
+          DEBUG_MSG(F("Done\n"));
           #endif
           _state = stateCmdDone;
           return;  
@@ -160,10 +180,7 @@ class CommandAssembler
         uint8_t* buffer = reinterpret_cast<uint8_t*>(_newCmd->GetBuffer());
         buffer[_cmdContentRecv] = byteValue;
 #if defined(CMD_DEBUG) && CMD_DEBUG == 1
-        Serial.print("stateGetCmdContent recv: ");
-        Serial.print(_cmdContentRecv+1);
-        Serial.print("/");
-        Serial.println(_newCmd->GetBufferSize());
+        DEBUG_MSGF(F("stateGetCmdContent recv: %d/%d\n"), _cmdContentRecv+1, _newCmd->GetBufferSize());
 #endif
         if (++_cmdContentRecv == _newCmd->GetBufferSize())
         {
@@ -176,21 +193,25 @@ private:
     Command* CreateCommand(uint8_t cmdId, const uint32_t bufferSz)
     {
       #if defined(CMD_DEBUG) && CMD_DEBUG==1
-      Serial.print("cmdID: "); Serial.println(static_cast<uint8_t>(cmdId));
+      DEBUG_MSGF(F("cmdID: %d\n"), cmdId);
       #endif
       if (_commands[cmdId] == nullptr)
       {
-        Serial.println("Command not registered");
+        Serial.println(F("Command not registered"));
         while(true) {};
       }
-      _newCmd = _commands[cmdId]();
-      if (_newCmd != nullptr && bufferSz>0)
+      if (_newCmd != nullptr)
       {
-        _newCmd->AllocateBuffer(bufferSz);
+        Serial.println(F("ERROR - Command not freed"));
       }
-      else
+
+      _newCmd = _commands[cmdId]();
+      if (_newCmd != nullptr)
       {
-        _newCmd = nullptr;
+        if (bufferSz > 0)
+        {
+          _newCmd->AllocateBuffer(bufferSz);
+        }
       }
     }
 };
