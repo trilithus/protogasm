@@ -70,8 +70,7 @@ RunningAverageT<unsigned short, RA_FREQUENCY*RA_HIST_SECONDS> raPressure;
 
 #if 1
 #define font_13pt u8g2_font_6x13_tr
-#define font_24pt u8g2_font_inb24_mr 
-#define font_15pt u8g2_font_6x13_tr 
+#define font_24pt u8g2_font_logisoso24_tn//u8g2_font_inb24_mr 
 #else
 #define font_13pt u8g2_font_6x13_tr
 #define font_24pt u8g2_font_6x13_tr 
@@ -114,6 +113,7 @@ constexpr uint8_t VIBRATOR_PUSH_DELAY = 100;
 #define FREQUENCY 60 //Update frequency in Hz
 #define LONG_PRESS_MS 600 //ms requirements for a long press, to move to option menus
 #define V_LONG_PRESS_MS 2500 //ms for a very long press, which turns the device off
+#define EDGEALGORITHM 1
 
 //Update/render period
 #define period (1000/FREQUENCY)
@@ -154,62 +154,22 @@ auto lastEdgeCountChange = millis();
 
 //Utility
 static int clamp(const int val, const int minVal, const int maxVal) { return (val<minVal) ? minVal : (val>maxVal ? maxVal : val); };
-void beep_motor(int f1, int f2, int f3) {
-  /*
-    analogWrite(MOTPIN, 0);
-    tone(MOTPIN, f1);
-    delay(250);
-    tone(MOTPIN, f2);
-    delay(250);
-    tone(MOTPIN, f3);
-    delay(250);
-    noTone(MOTPIN);
-    analogWrite(MOTPIN, motSpeed);
-  */
-}
 
 //======= DEBUG ===============================
 #define DEBUG_LOG_ENABLED 0
-void logDebug()
-{
-#if defined(DEBUG_LOG_ENABLED) && DEBUG_LOG_ENABLED==1
-  static bool printed_header = false;
-  if (printed_header == false)
-  {
-    printed_header = true;
-    Serial.println(F("Time,Motor,Pressure,Avg Pressure"));
-  }
-#if defined(DEBUG_OPT_LOGTIMESTAMP) && DEBUG_OPT_LOGTIMESTAMP==1
-  Serial.print(millis() / 1000.0); //Timestamp (s)
-  Serial.print(F(","));
-#endif
-  Serial.print(motSpeed); //Motor speed (0-255)
-  Serial.print(F(","));
-  Serial.print(g_pressure); //(Original ADC value - 12 bits, 0-4095)
-  Serial.print(F(","));
-  Serial.print(avgPressure); //Running average of (default last 25 seconds) pressure
-  Serial.print(F(","));
-  Serial.print(g_pressure - avgPressure);
-  Serial.print(F(","));
-  Serial.print(pLimit);
-  Serial.println(F(","));
-  
-#endif
-}
-
 void logI2C(String& output)
 {
   output = "";
   output += (millis() / 1000.0); //Timestamp (s)
-  output += (F(","));
+  output += (",");
   output += (motSpeed); //Motor speed (0-255)
-  output += (F(","));
+  output += (",");
   output += (g_pressure); //(Original ADC value - 12 bits, 0-4095)
-  output += (F(","));
+  output += (",");
   output += (avgPressure); //Running average of (default last 25 seconds) pressure
-  output += (F(","));
+  output += (",");
   output += (g_pressure - avgPressure);
-  output += (F(","));
+  output += (",");
   output += (pLimit);
   output += (F(",\r\n"));
 }
@@ -246,13 +206,17 @@ class Logic : Coroutine
     uint8_t check_button();
     void run_state_machine(uint8_t state);
     uint8_t set_state(uint8_t btnState, uint8_t state);
+    void resetSession();
   public:
     void Setup();
-    void Update();
-
     virtual int runCoroutine() override;
   private:
     static int sampleTick;
+
+    #if (defined(EDGEALGORITHM) && EDGEALGORITHM==1)
+    float _cooldown = 0.0f;
+    unsigned long _lastEdgeTime=0;
+    #endif
 } g_logic;
 
 class Sensor : Coroutine
@@ -285,8 +249,8 @@ class Vibrator : Coroutine
   protected:
     int8_t getStateDiff() const 
     { 
-        int8_t fromStrength = clamp(static_cast<int8_t>(_currentState.mode), 0, MAX_LEVEL);
-        int8_t toStrength = clamp(static_cast<int8_t>(_targetState.mode), 0, MAX_LEVEL);
+        const int8_t fromStrength = clamp(static_cast<int8_t>(_currentState.mode), 0, MAX_LEVEL);
+        const int8_t toStrength = clamp(static_cast<int8_t>(_targetState.mode), 0, MAX_LEVEL);
         return toStrength - fromStrength; 
       }
 } g_vibrator;
@@ -369,27 +333,7 @@ int LCD::runCoroutine()
 
 void LCD::Setup()
 {
-  #if 0
-  u8g2.setI2CAddress(0x3C*2);
-  u8g2.setBusClock(12500);
-  Wire.setClock(12500);
-  #if 0
-  #if 0
-  u8g2.setBusClock(35);//200000);
-  //Wire.setTimeout(100);
-  Wire.setWireTimeout(50000, true);
-  #endif
-
-  Wire.setWireTimeout(10000, false);
-  #endif
-  #endif
   u8g2.begin();
-
-  setLCDFunc(lcdfunc_renderText, __DATE__, __TIME__);
-  do {
-    lcdrender_activefunc();
-  } while( u8g2.nextPage() );
-  lcdrender_activefunc = nullptr;
 }
 
 void LCD::Update()
@@ -503,12 +447,9 @@ void LCD::lcdfunc_renderTarget()
   u8g2.setFont(font_13pt);
   u8g2.setCursor(0, 20);
   u8g2.print(F("T "));
-  u8g2.setFont(font_15pt );
   u8g2.setCursor(10, u8g2.getMaxCharHeight());
   u8g2.print(lcdrenderdata[0].integer32);
-  u8g2.setFont(font_13pt);
   u8g2.print(F(" / "));
-  u8g2.setFont(font_15pt);
   u8g2.print(lcdrenderdata[1].integer32);
 
   uint8_t left = 10;
@@ -723,9 +664,51 @@ void Vibrator::vibrator_to(const int mode)
 
 int Vibrator::map_motspeed_to_vibrator()
 {
-  const float pct[] = { 0.25, 0.21, 0.17, 0.13, 0.13, 0.11 };
+  static constexpr uint8_t pct[] = {uint8_t(0.25f * 255.0f),
+                                    uint8_t(0.21f * 255.0f), 
+                                    uint8_t(0.17f * 255.0f), 
+                                    uint8_t(0.13f * 255.0f), 
+                                    uint8_t(0.13f * 255.0f), 
+                                    uint8_t(0.11f * 255.0f)};
   static constexpr uint8_t speedCount = (sizeof(pct)/sizeof(pct[0]));
-  static uint8_t ranges[speedCount+1][2];
+  const uint8_t speed = (uint8_t)clamp(motSpeed, 0.0f, 255.0f);
+  if (speed <= 1)
+  {
+    return 0;
+  } else if(speed >= maxSpeed)
+  {
+    //Go back, as to not overstimulate.
+    motSpeed = 2.0f;
+  }
+
+  //Map motSpeed to index:
+  uint8_t lastValue = 1;
+  
+  //1,2,3,4 speed settinsg:
+  for(auto i=0; i < speedCount; i++)
+  {
+    if (speed > lastValue &&  speed <= lastValue + pct[i])
+    {
+      return i+1;
+    }
+    lastValue += pct[i];
+  }
+  return -1;
+
+  #if 0
+  #if 0
+  constexpr float pct[] = { 0.25, 0.21, 0.17, 0.13, 0.13, 0.11 };
+  constexpr uint8_t speedCount = (sizeof(pct)/sizeof(pct[0]));
+  constexpr uint8_t ranges[speedCount+1][2] = {
+    { 0.0f, 1.0f },
+    { 1.0f, pct[0]*255.0f},
+    { (pct[0]*255.0f), (pct[0]*255.0f) + (pct[1]*255.0f)},
+    { (pct[0]*255.0f) + (pct[1]*255.0f), (pct[0]*255.0f) + (pct[1]*255.0f) +  (pct[2]*255.0f)},
+    { (pct[0]*255.0f) + (pct[1]*255.0f) + (pct[2]*255.0f), (pct[0]*255.0f) + (pct[1]*255.0f) +  (pct[2]*255.0f) + (pct[3]*255.0f)},
+    { (pct[0]*255.0f) + (pct[1]*255.0f) + (pct[2]*255.0f) + (pct[3]*255.0f), (pct[0]*255.0f) + (pct[1]*255.0f) +  (pct[2]*255.0f) + (pct[3]*255.0f) + (pct[4]*255.0f)},
+    { (pct[0]*255.0f) + (pct[1]*255.0f) + (pct[2]*255.0f) + (pct[3]*255.0f) + (pct[4]*255.0f), (pct[0]*255.0f) + (pct[1]*255.0f) +  (pct[2]*255.0f) + (pct[3]*255.0f) + (pct[4]*255.0f) + (pct[5]*255.0f)}
+  };
+  #if 0
   static bool initialized = false;
   if(!initialized)
   {
@@ -755,6 +738,7 @@ int Vibrator::map_motspeed_to_vibrator()
     }
 #endif
   }
+  #endif
 
   if(motSpeed >= maxSpeed)
   {
@@ -771,6 +755,57 @@ int Vibrator::map_motspeed_to_vibrator()
     }
   }
   return -1;
+  #endif
+
+  constexpr float pct[] = { 0.25f * 255.0f, 0.21f * 255.0f, 0.17f * 255.0f, 0.13f * 255.0f, 0.13f * 255.0f, 0.11f * 255.0f };
+  constexpr uint8_t speedCount = (sizeof(pct)/sizeof(pct[0]));
+  static float ranges[speedCount+1][2];
+  static bool initialized = false;
+  if(!initialized)
+  {
+    initialized = true;
+
+    //Off:
+    ranges[0][0] = 0;
+    ranges[0][1] = 1;
+    float lastValue = 1.0f;
+    
+    //1,2,3,4 speed settinsg:
+    for(auto i=0; i < speedCount; i++)
+    {
+      ranges[1+i][0] = lastValue;
+      ranges[1+i][1] = clamp(lastValue + pct[i], 0.0f, 255.0f);
+      lastValue = ranges[1+i][1];
+    }
+#if 0
+    for(auto i=0; i < speedCount+1; i++)
+    {
+      Serial.print(F("["));
+      Serial.print(i);
+      Serial.print(F("] "));
+      Serial.print(ranges[i][0]);
+      Serial.print(F("-"));
+      Serial.println(ranges[i][1]);
+    }
+#endif
+  }
+
+    if(motSpeed >= (float)maxSpeed)
+  {
+    //Go back, as to not overstimulate.
+    motSpeed = ranges[2][0];
+  }
+
+  //Map motSpeed to index:
+  for (auto i=0; i < speedCount+1; i++)
+  {
+    if (motSpeed >= ranges[i][0] && motSpeed < ranges[i][1])
+    {
+      return i;
+    }
+  }
+  return -1;
+  #endif
 };
 /////////////////////////////////////////////////////
 // LEDs
@@ -830,9 +865,9 @@ void Sensor::Setup()
         s_lastTime = time;
 
         s_tickaccumulator += elapsed;
-        if (s_tickaccumulator >= 1e6 / 60)
+        if (s_tickaccumulator >= 1000000 / 60)
         {
-          s_tickaccumulator -= 1e6 / 60;
+          s_tickaccumulator -= 1000000 / 60;
           s_tick++;
         }
 
@@ -869,7 +904,7 @@ int Logic::sampleTick = 0;
 int Logic::runCoroutine()
     {
       COROUTINE_LOOP()
-      {       
+      {              
         fadeToBlackBy(leds,NUM_LEDS,20); //Create a fading light effect. LED buffer is not otherwise cleared
         static uint8_t l_btnState = 0;
         l_btnState = check_button();
@@ -885,13 +920,11 @@ int Logic::runCoroutine()
             SessionBeginEndCmd cmd;
             cmd.SetValue((state == AUTO) ? true : false);
             g_i2c.SendI2CCommand(&cmd);
+            resetSession();
           }
         }
         run_state_machine(l_newState);
         FastLED.show(); //Update the physical LEDs to match the buffer in software
-
-        //Alert that the Pressure voltage amplifier is railing, and the trim pot needs to be adjusted
-        if(g_pressure > 4030)beep_motor(2093,2093,2093); //Three high beeps
         COROUTINE_YIELD();
       }
     }
@@ -904,17 +937,24 @@ void Logic::Setup()
   //Storage:
   sensitivity = EEPROM.read(SENSITIVITY_ADDR);
   maxSpeed = min(EEPROM.read(MAX_SPEED_ADDR), MOT_MAX); //Obey the MOT_MAX the first power  cycle after chaning it.
-  beep_motor(1047,1396,2093); //Power on beep
+
+  resetSession();
 }
 
-void Logic::Update()
+#define DEFAULT_COOLDOWN_s 25.0f
+#define DEFAULT_COOLDOWN_ADJUSTMENT_FASTER_s 3.0f
+#define DEFAULT_COOLDOWN_ADJUSTMENT_SLOWER_s 8.0f
+#define DEFAULT_EDGETIME_TARGET_s 27.0f
+#define DEFAULT_EDGETIME_TARGET_MIN_S 2.0f
+#define DEFAULT_EDGETIME_TARGET_MAX_s (DEFAULT_EDGETIME_TARGET_s+13.0f)
+#define DEFAULT_MIN_COOLDOWN_s 20.0f
+#define DEFAULT_MAX_COOLDOWN_s 45.0f
+void Logic::resetSession()
 {
-
-    //Run this section at the update frequency (default 60 Hz)
-  if (millis() % period == 0) {   
-    //Report pressure and motor data over USB for analysis / other uses. timestamps disabled by default
-    logDebug();
-  }
+#if (defined(EDGEALGORITHM) && EDGEALGORITHM == 1)
+  _cooldown = DEFAULT_COOLDOWN_s;
+  _lastEdgeTime = millis();
+#endif
 }
 
 // Manual vibrator control mode (red), still shows orgasm closeness in background
@@ -948,7 +988,7 @@ void Logic::run_auto()
   static float motIncrement = 0.0;
   motIncrement = ((float)maxSpeed / ((float)FREQUENCY * (float)rampTimeS));
 
-  int knob = encLimitRead(0,(3*NUM_LEDS)-1);
+  const int knob = encLimitRead(0,(3*NUM_LEDS)-1);
   sensitivity = knob*4; //Save the setting if we leave and return to this state
   //Reverse "Knob" to map it onto a pressure limit, so that it effectively adjusts sensitivity
   pLimit = map(knob, 0, 3 * (NUM_LEDS - 1), DEFAULT_PLIMIT, 1); //set the limit of delta pressure before the vibrator turns off
@@ -961,12 +1001,41 @@ void Logic::run_auto()
   if (g_pressure - avgPressure > pLimit) {
     if (motSpeed > 0.0f)
     {
+      #if (defined(EDGEALGORITHM) && EDGEALGORITHM==1)
+      //Adjust cooldown
+      const float edgeTime = static_cast<float>(millis()-_lastEdgeTime) / 1000.0f;
+      const float diff = edgeTime - DEFAULT_EDGETIME_TARGET_s;
+
+      Serial.print(F("Adjusted cooldown: "));
+      Serial.print(_cooldown);
+      Serial.print(F("s -> "));
+      if (diff >= 0.0f)
+      { //Too slow
+        const float x = clamp(diff / DEFAULT_EDGETIME_TARGET_MAX_s, 0.0f, 1.0f);
+        const float adjustment = ((pow(x-1.0f, 3.0f))+1.0f) * DEFAULT_COOLDOWN_ADJUSTMENT_FASTER_s;
+        _cooldown -= adjustment;
+      } else if (diff < 0.0f)
+      { //Too fast!
+        const float x = clamp(1.0f - (edgeTime/DEFAULT_EDGETIME_TARGET_s), 0.0f, 1.0f);
+        _cooldown += (((pow(x-1.0f, 3.0f))+1.0f) * DEFAULT_COOLDOWN_ADJUSTMENT_SLOWER_s);
+      }
+      _cooldown = clamp(_cooldown, DEFAULT_EDGETIME_TARGET_MIN_S, DEFAULT_EDGETIME_TARGET_MAX_s);
+      _lastEdgeTime = millis();
+      Serial.print(_cooldown);
+      Serial.println(F("s."));
+      #endif
+
       g_vibrator.vibrator_off();
       g_vibrator.vibrator_to(0);
       edgeCount++;
       lastEdgeCountChange = millis();
     }
+
+    #if !defined(EDGEALGORITHM) || EDGEALGORITHM==0
     motSpeed = -s_cooldownTime*(float)rampTimeS*((float)FREQUENCY*motIncrement);//Stay off for a while (half the ramp up time)
+    #elif (defined(EDGEALGORITHM) && EDGEALGORITHM==1)
+    motSpeed = -_cooldown*((float)FREQUENCY*motIncrement);
+    #endif
     
   }
   else if (motSpeed < (float)maxSpeed) {
@@ -1057,13 +1126,7 @@ uint8_t Logic::set_state(uint8_t btnState, uint8_t state)
     Serial.println(F("power off"));
     fill_gradient_RGB(leds,0,CRGB::Black,NUM_LEDS-1,CRGB::Black);//Turn off LEDS
     FastLED.show();
-    g_vibrator.vibrator_off();
-    //analogWrite(MOTPIN, 0);
-    beep_motor(2093,1396,1047);
-    //analogWrite(MOTPIN, 0); //Turn Motor off
-    g_vibrator.vibrator_off();
     while(!digitalRead(ENC_SW))delay(1);
-    beep_motor(1047,1396,2093);
     return MANUAL ;
   }
   else if(btnState == BTN_SHORT){
@@ -1114,9 +1177,11 @@ int I2C::runCoroutine()
   #if 1
   COROUTINE_LOOP()
   {
-    COROUTINE_DELAY(250);
     static String i2cstring;
     logI2C(i2cstring);
+    #if defined(DEBUG_LOG_ENABLED) && DEBUG_LOG_ENABLED==1
+    Serial.print(i2cstring);
+    #endif
 
     static PrintCmd *cmd = nullptr;
     cmd = new PrintCmd();
@@ -1133,6 +1198,7 @@ int I2C::runCoroutine()
     {
       Serial.println(F("Out of Memory!"));
     }
+    COROUTINE_DELAY(250);
     COROUTINE_YIELD();
   }
   #endif
@@ -1175,7 +1241,7 @@ void I2C::SendI2CCommand(Command* cmd)
   do
   {
     Wire.beginTransmission(0x43); 
-    uint8_t written = Wire.write(buffer, clamp(sz, 0, 10));
+    const uint8_t written = Wire.write(buffer, clamp(sz, 0, 10));
     sz -= written;
     buffer += written;
     Wire.endTransmission();    /* stop transmitting */
@@ -1189,8 +1255,8 @@ void I2C::SendI2CCommand(Command* cmd)
 //C1,C2,C3 are colors for each of 3 revolutions over the 13 LEDs (39 values)
 void draw_cursor_3(int pos,CRGB C1, CRGB C2, CRGB C3){
   pos = constrain(pos,0,NUM_LEDS*3-1);
-  int colorNum = pos/NUM_LEDS; //revolution number
-  int cursorPos = pos % NUM_LEDS; //place on circle, from 0-12
+  const int colorNum = pos/NUM_LEDS; //revolution number
+  const int cursorPos = pos % NUM_LEDS; //place on circle, from 0-12
   switch(colorNum){
     case 0:
       leds[cursorPos] = C1;
@@ -1213,8 +1279,8 @@ void draw_cursor(int pos,CRGB C1){
 //Draw 3 revolutions of bars around the LEDs. From 0-39, 3 colors
 void draw_bars_3(int pos,CRGB C1, CRGB C2, CRGB C3){
   pos = constrain(pos,0,NUM_LEDS*3-1);
-  int colorNum = pos/NUM_LEDS; //revolution number
-  int barPos = pos % NUM_LEDS; //place on circle, from 0-12
+  const int colorNum = pos/NUM_LEDS; //revolution number
+  const int barPos = pos % NUM_LEDS; //place on circle, from 0-12
   switch(colorNum){
     case 0:
       fill_gradient_RGB(leds,0,C1,barPos,C1);
