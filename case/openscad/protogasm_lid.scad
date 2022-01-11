@@ -55,9 +55,9 @@ echo("wide", wide + roundR*2); // total wide
 pcbWide=53.3;
 pcbLenght=68.58;
 pcbHeight=1.64;
-usbHolePosition=38.1;
+usbHolePosition=38.1 + 3 - 0.5;
 usbHeight=10.8 + 2;
-usbWide=11.43 + 2;
+usbWide=11.43 + 5;
 powerJackPosition=7.62;
 powerJackWide=8.9 +2;
 powerJackHeight=10.8 +2;
@@ -95,6 +95,8 @@ difference()
             h=(height/2 + blockLockSize + extra_headroom);
             translate([0,0,height/2]) cube([width+(roundR*2), wide + (2*roundR), h], true);
         }
+        
+        
 	}
 																		// SUBSTRACT
 	union()
@@ -162,6 +164,7 @@ difference()
 				cube([pillarSize, sidePanelYWidth, height+extra_headroom], center=true);
 			}
 			
+           
             // Cut USB and Power holes
 			// Rotate due to panel upside down
 			mirror([0, 1 , 0])
@@ -191,6 +194,19 @@ difference()
             translate([17.5,0,2])
             cube([12.5, 38, 2], true);
         }
+        
+                    // Cut connector holes:
+            rotate([90, 0, 0])
+            translate([0,8,10+width/2])
+            {
+                cylinder(h=8, r=3.5, center=true);
+            }
+            
+            rotate([90, 0, 0])
+            translate([0,8,-10 + -(width/2)])
+            {
+                cylinder(h=8, r=3.5, center=true);
+            }
 	}
     
 }
@@ -212,3 +228,13 @@ difference() {
         cylinder(h=20, r = 8/2, center=true);
     }
 }
+
+/*
+translate([0,0,height-3])
+union() {
+    difference() {
+     cylinder(h=2, r = 65.5*0.5, center = true); 
+     cylinder(h=11, r = 52.3*0.5, center = true);
+   }
+}
+*/

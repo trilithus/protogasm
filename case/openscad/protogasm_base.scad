@@ -8,8 +8,12 @@
 
 include <protogasm_param.scad>
 is_dummy = false;
-usbHolePosition=38.1 + 3;
-usbWide=11.43 + 4;
+usbHolePosition=38.1 + 3 - 0.5;
+usbHeight=10.8 + 2;
+usbWide=11.43 + 5;
+powerJackPosition=7.62;
+powerJackWide=8.9 +2;
+powerJackHeight=10.8 +2;
 
 //------------------------------------------------------------------------- MODULES
 module pcbLeg() {		
@@ -139,8 +143,8 @@ difference()
 			translate([-pcbPositionX, -pcbWide/2, pcbPositionZ + pcbHeight])
 			{
 				// cut power hole
-				translate([0, powerJackPosition, (powerJackHeight-2)/2])
-				cube([10, powerJackWide, powerJackHeight], center=true);
+				translate([0, powerJackPosition+10, (powerJackHeight-2)/2])
+				cube([10, powerJackWide+20, powerJackHeight], center=true);
 				
                 // cut usb hole
 				translate([0, usbHolePosition, (usbHeight-2)/2])
