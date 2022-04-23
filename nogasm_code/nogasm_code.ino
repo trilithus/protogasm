@@ -53,10 +53,12 @@
 using namespace ace_routine;
 
 //Running pressure average array length and update frequency
-#define RA_HIST_SECONDS 25 //25
-#define RA_FREQUENCY 6
+#define RA_HIST_SECONDS 15 //25
+#define RA_FREQUENCY 10
 #define RA_TICK_PERIOD (FREQUENCY / RA_FREQUENCY)
+
 RunningAverageT<unsigned short, RA_FREQUENCY*RA_HIST_SECONDS> raPressure;
+RunningAverageT<unsigned short, 8> curPressure;
 
 //LCD
 #define U8X8_HAVE_HW_I2C
@@ -96,7 +98,7 @@ Encoder myEnc(3, 2); //Quadrature inputs
 constexpr uint8_t PIN_VIBRATOR_ONOFF = 12;
 constexpr uint8_t PIN_VIBRATOR_DOWN = 8;
 constexpr uint8_t PIN_VIBRATOR_UP = 13;
-constexpr uint8_t VIBRATOR_PUSH_DELAY = 100;
+constexpr uint8_t VIBRATOR_PUSH_DELAY = 150;
 
 //Storage
 #define I2C_PROTOCOL 0
@@ -151,6 +153,7 @@ int maxSpeed = 255; //maximum speed the motor will ramp up to in automatic mode
 float motSpeed = 0; //Motor speed, 0-255 (float to maintain smooth ramping to low speeds)
 uint16_t edgeCount = 0;
 auto lastEdgeCountChange = millis();
+static uint32_t g_tick = 0;
 
 //Utility
 static int clamp(const int val, const int minVal, const int maxVal) { return (val<minVal) ? minVal : (val>maxVal ? maxVal : val); };
@@ -160,7 +163,7 @@ static int clamp(const int val, const int minVal, const int maxVal) { return (va
 void logI2C(String& output)
 {
   output = "";
-  output += (millis() / 1000.0); //Timestamp (s)
+  output += g_tick;//(millis() / 1000.0); //Timestamp (s)
   output += (",");
   output += (motSpeed); //Motor speed (0-255)
   output += (",");
@@ -397,7 +400,7 @@ void LCD::run_lcd_status(uint8_t state)
   {
     case 0:
       {
-        setLCDFunc(lcdfunc_renderPressure, avgPressure);
+        setLCDFunc(lcdfunc_renderPressure, g_pressure);
       } break;
     case 1:
       {
@@ -605,7 +608,7 @@ int Vibrator::runCoroutine()
       }
       if (diff > 0)
       {
-        for (i = 0; i < diff; i++)
+        for (i = 0; i < diff && _currentState.powered; i++)
         {
           //turn up:
           _currentState.mode++;
@@ -618,7 +621,7 @@ int Vibrator::runCoroutine()
       }
       else if (diff < 0)
       {
-        for (i = 0; i < -diff; i++)
+        for (i = 0; i < -diff && _currentState.powered; i++)
         {
           //turn down:
           _currentState.mode--;
@@ -826,9 +829,10 @@ void LEDs::Update()
 // Sensor
 void Sensor::Setup()
     {
-      analogReference(EXTERNAL);
+      analogReference(INTERNAL);//(EXTERNAL);
       pinMode(BUTTPIN, INPUT); //default is 10 bit resolution (1024), 0-3.3
       raPressure.clear();      //Initialize a running pressure average
+      curPressure.clear();
 
       //Check memory, if size is 0, we failed to allocate...
       if (raPressure.getSize() == 0)
@@ -840,7 +844,56 @@ void Sensor::Setup()
     int Sensor::runCoroutine() 
     {
       static auto s_lastTime = micros();
-      static uint32_t s_tick = 0;
+      static int32_t s_tickaccumulator = 0;
+      static uint32_t s_lastTick = 0;
+
+      COROUTINE_LOOP()
+      {
+        static auto time = micros();
+        static auto timeMillis = millis();
+        static auto elapsed = 0ul;
+        time = micros();
+        timeMillis = micros();
+        elapsed = [&]()
+        {
+          if (time >= s_lastTime)
+          {
+            return time - s_lastTime;
+          }
+          else
+          {
+            return (ULONG_MAX - s_lastTime) + time;
+          }
+        }();
+        s_lastTime = time;
+
+        s_tickaccumulator += elapsed;
+        if (s_tickaccumulator >= 1000000 / RA_FREQUENCY)
+        {
+          s_tickaccumulator -= 1000000 / RA_FREQUENCY;
+          g_tick++;
+        }
+
+        auto pressure = analogRead(BUTTPIN)*8;
+        curPressure.addValue(pressure);
+        g_pressure = curPressure.getAverage();
+
+        if (s_lastTick != g_tick)
+        {
+          s_lastTick = g_tick;
+          raPressure.addValue(curPressure.getAverage());
+          avgPressure = raPressure.getAverage();
+          COROUTINE_YIELD();
+        } else {
+          COROUTINE_DELAY(1);
+        }
+      }
+    }
+#if 0
+    int Sensor::runCoroutine() 
+    {
+      static auto s_lastTime = micros();
+      static uint32_t g_tick = 0;
       static int32_t s_tickaccumulator = 0;
       static uint32_t s_lastTick = 0;
 
@@ -868,13 +921,13 @@ void Sensor::Setup()
         if (s_tickaccumulator >= 1000000 / 60)
         {
           s_tickaccumulator -= 1000000 / 60;
-          s_tick++;
+          g_tick++;
         }
 
-        if (s_lastTick != s_tick)
+        if (s_lastTick != g_tick)
         {
-          s_lastTick = s_tick;
-          if (s_tick % RA_TICK_PERIOD == 0)
+          s_lastTick = g_tick;
+          if (g_tick % RA_TICK_PERIOD == 0)
           {
             raPressure.addValue(g_pressure);
             avgPressure = raPressure.getAverage();
@@ -896,7 +949,7 @@ void Sensor::Setup()
         COROUTINE_YIELD();
       }
     }
-
+#endif
 /////////////////////////////////////////////////////
 // Logic
 int Logic::sampleTick = 0;
@@ -941,7 +994,7 @@ void Logic::Setup()
   resetSession();
 }
 
-#define DEFAULT_COOLDOWN_s 25.0f
+#define DEFAULT_COOLDOWN_s 45.0f
 #define DEFAULT_COOLDOWN_ADJUSTMENT_FASTER_s 3.0f
 #define DEFAULT_COOLDOWN_ADJUSTMENT_SLOWER_s 8.0f
 #define DEFAULT_EDGETIME_TARGET_s 27.0f
