@@ -160,8 +160,10 @@ static int clamp(const int val, const int minVal, const int maxVal) { return (va
 
 //======= DEBUG ===============================
 #define DEBUG_LOG_ENABLED 0
+#define PROFILING_ENABLED 0
 void logI2C(String& output)
 {
+  #if defined(DEBUG_LOG_ENABLED) && DEBUG_LOG_ENABLED==1
   output = "";
   output += g_tick;//(millis() / 1000.0); //Timestamp (s)
   output += (",");
@@ -175,6 +177,7 @@ void logI2C(String& output)
   output += (",");
   output += (pLimit);
   output += (F(",\r\n"));
+#endif
 }
 
 //=======EEPROM Addresses============================
@@ -244,6 +247,7 @@ class Vibrator : Coroutine
     void vibrator_down();
     void vibrator_off();
     void vibrator_on();
+    void vibrator_reset();
     void vibrator_to(const int mode);
     void set_vibrator_mode(int fromStrength, int toStrength);
     int map_motspeed_to_vibrator();
@@ -521,7 +525,7 @@ namespace bitmaps
 
   void LCD::lcdfunc_edgeCount()
   {
-    u8g2.setFont(font_24pt);
+    //u8g2.setFont(font_24pt);
     u8g2.setCursor(0, u8g2.getMaxCharHeight() - 4);
 
     u8g2.setFont(font_13pt);
@@ -656,6 +660,7 @@ void Vibrator::Update()
 void Vibrator::vibrator_up() { if (_targetState.mode<MAX_LEVEL) {  _targetState.mode++; } }
 void Vibrator::vibrator_down() { if (_targetState.mode>0) { _targetState.mode--; } }
 void Vibrator::vibrator_off() { _targetState.powered = false; }
+void Vibrator::vibrator_reset() { _targetState.mode=0; _currentState.mode=MAX_LEVEL; }
 void Vibrator::vibrator_on() { if (!_targetState.powered) { _targetState.powered = true; } }
 void Vibrator::vibrator_to(const int mode) 
 { 
@@ -1026,7 +1031,7 @@ void Logic::run_manual()
   else
   {
     g_vibrator.vibrator_off();
-    g_vibrator.vibrator_to(0);
+    g_vibrator.vibrator_reset();
   }
 
   //gyrGraphDraw(avgPressure, 0, 4 * 3 * NUM_LEDS);
@@ -1079,7 +1084,7 @@ void Logic::run_auto()
       #endif
 
       g_vibrator.vibrator_off();
-      g_vibrator.vibrator_to(0);
+      g_vibrator.vibrator_reset();
       edgeCount++;
       lastEdgeCountChange = millis();
     }
@@ -1104,7 +1109,7 @@ void Logic::run_auto()
   else
   {
     g_vibrator.vibrator_off();
-    g_vibrator.vibrator_to(0);
+    g_vibrator.vibrator_reset();
   }
   
   int presDraw = map(constrain(g_pressure - avgPressure, 0, pLimit), 0, pLimit, 0, NUM_LEDS * 3);
@@ -1356,7 +1361,7 @@ int encLimitRead(int minVal, int maxVal){
   return constrain(myEnc.read()/4,minVal,maxVal);
 }
 
-//typedef void (*ProfiledFunc)();
+#if defined(PROFILING_ENABLED) && PROFILING_ENABLED==1
 using ProfiledFunc = void (*)();
 void profile(int storageID, ProfiledFunc profiledFunc)
 {
@@ -1386,6 +1391,7 @@ void profile(int storageID, ProfiledFunc profiledFunc)
     }
   }
 }
+#endif
 
 //=======Setup=======================================
 void setup() 
@@ -1399,8 +1405,6 @@ void setup()
   g_leds.Setup();  delay(100); Serial.println(F("LEDS up")); Serial.flush();
   g_vibrator.Setup();  delay(100); Serial.println(F("Vibrator up")); Serial.flush();
   g_i2c.Setup();  delay(100); Serial.println(F("i2C up")); Serial.flush();
-  
-  Serial.println("Started up");
 }
 
 //=======Main Loop=============================
