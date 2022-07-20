@@ -10,7 +10,7 @@
  * that can be identified by the color of the LEDs, especially the RGB LED
  * in the central button/encoder knob.
  * 
- * [Red]    Manual Vibrator Control
+ * [Red]    Vibrator Control Test
  * [Blue]   Automatic vibrator edging, knob adjusts orgasm detection sensitivity
  * [Green]  Setting menu for maximum vibrator speed in automatic mode
  * [White]  Debubbing menu to show data from the pressure sensor ADC
@@ -124,17 +124,26 @@ constexpr uint8_t VIBRATOR_PUSH_DELAY = 150;
 int sensitivity = 0; //orgasm detection sensitivity, persists through different states
 
 //=======State Machine Modes=========================
-#define MANUAL      1
-#define AUTO        2
+enum class MachineStates
+{
+  UNDEFINED,
+  menu,
+  manual_motor_control,
+  manual_edge_control,
+  auto_edge_control,
+  read_variable,
+};
+
 
 //Button states - no press, short press, long press
-#define BTN_NONE   0
-#define BTN_SHORT  1
-#define BTN_LONG   2
-#define BTN_V_LONG 3
+enum class PhysBtnState
+{
+  None,
+  Short,
+  Long,
+  VLong,
+};
 
-
-uint8_t state = MANUAL;
 //=======Global Settings=============================
 #define MOT_MAX 255 // Motor PWM maximum
 //#define MOT_MIN 20  // Motor PWM minimum.  It needs a little more than this to start.
@@ -155,8 +164,62 @@ uint16_t edgeCount = 0;
 auto lastEdgeCountChange = millis();
 static uint32_t g_tick = 0;
 
+//Menu Items:
+enum class MenuItemsEnum : uint8_t
+{
+  INVALID = 0,
+  test,
+  manual,
+  automatic,
+  automatic_start,
+  automatic_input_time,
+  automatic_input_min,
+  automatic_input_max,
+  automatic_back,
+  resetSession,
+  back,
+  LAST,
+};
+
+MenuItemsEnum g_rootMenu[] {
+  MenuItemsEnum::INVALID,
+  MenuItemsEnum::test,
+  MenuItemsEnum::manual,
+  MenuItemsEnum::automatic,
+  MenuItemsEnum::resetSession,
+  MenuItemsEnum::LAST,
+};
+
+MenuItemsEnum g_automaticMenu[] {
+  MenuItemsEnum::INVALID,
+  MenuItemsEnum::automatic_start,
+  MenuItemsEnum::automatic_input_time,
+  MenuItemsEnum::automatic_input_min,
+  MenuItemsEnum::automatic_input_max,
+  MenuItemsEnum::automatic_back,
+  MenuItemsEnum::LAST,
+};
+
+const __FlashStringHelper& getMenuItemLabels(MenuItemsEnum pValue, String& output)
+{
+  switch(pValue)
+  {
+    case MenuItemsEnum::test: output = F("Mode: Test"); return;
+    case MenuItemsEnum::manual: output = F("Mode: Manual Edging"); return;
+    case MenuItemsEnum::automatic: output = F("Mode: Automatic"); return;
+    case MenuItemsEnum::automatic_start: output = F("Start"); return;
+    case MenuItemsEnum::automatic_input_time: output = F("Duration: "); return;
+    case MenuItemsEnum::automatic_input_min: output = F("Start treshold: "); return;
+    case MenuItemsEnum::automatic_input_max: output = F("End treshold: "); return;
+    case MenuItemsEnum::automatic_back: output = F("[ Back ]"); return;
+    case MenuItemsEnum::resetSession: output = F("Reset Session"); return;
+    case MenuItemsEnum::LAST: output = F("!ERROR!"); return;
+  }
+}
+
 //Utility
-static int clamp(const int val, const int minVal, const int maxVal) { return (val<minVal) ? minVal : (val>maxVal ? maxVal : val); };
+template <typename T>
+T clamp(const T val, const T minVal, const T maxVal) { return (val<minVal) ? minVal : (val>maxVal ? maxVal : val); };
 
 //======= DEBUG ===============================
 #define DEBUG_LOG_ENABLED 0
@@ -185,6 +248,10 @@ void logI2C(String& output)
 #define BEEP_ADDR         1
 #define MAX_SPEED_ADDR    2
 #define SENSITIVITY_ADDR  3
+#define AUTOEDGE_MIN_ADDR 4 //4,5
+#define AUTOEDGE_MAX_ADDR 6 //6,7
+#define AUTOEDGE_TIME_ADDR 8 //8,9
+
 //#define RAMPSPEED_ADDR    4 //For now, ramp speed adjustments aren't implemented
 
 //=======Hardware Coroutines=========================
@@ -207,22 +274,54 @@ class I2C : public Coroutine
 class Logic : Coroutine
 {
   protected:
-    void run_auto();
-    void run_manual();
-    uint8_t check_button();
-    void run_state_machine(uint8_t state);
-    uint8_t set_state(uint8_t btnState, uint8_t state);
+    void run_menu();
+    void run_read_variable();
+    void run_automatic_edge_control();
+    void run_manual_edge_control();
+    void run_manual_motor_control();
+    PhysBtnState check_button();
+    void run_state_machine(MachineStates state);
+    MachineStates Logic::change_state(MachineStates newState);
     void resetSession();
   public:
     void Setup();
+    MachineStates getState() const { return _state; }
+    MenuItemsEnum getMenuItem() const { return *_currentMenuItem; }
+    bool isMenuItemLast() const { return _currentMenuItemState.isLast; }
+    bool isMenuItemFirst() const { return _currentMenuItemState.isFirst; }
+    int16_t getAutomaticInputMax() const { return _automatic_edge_maxtarget; }
+    int16_t getAutomaticInputMin() const { return _automatic_edge_mintarget; }
+    int16_t getAutomaticInputTime() const { return _automatic_edge_time; }
     virtual int runCoroutine() override;
   private:
     static int sampleTick;
+
+    MenuItemsEnum* _currentMenuItem = nullptr;
+    struct 
+    {
+      bool isFirst;
+      bool isLast;
+    } _currentMenuItemState;
+
+    MachineStates _state = MachineStates::UNDEFINED;
+    PhysBtnState _physBtnState = PhysBtnState::None;
+    int32_t _menuKnobState = 0;
+
+    int16_t* _readVariable = nullptr;
+    int16_t _readVariableMin = 0;
+    int16_t _readVariableMax = 1000;
+
+    int16_t _automatic_edge_maxtarget = 0;
+    int16_t _automatic_edge_mintarget = 0;
+    int16_t _automatic_edge_time = 0;
+    int16_t _autoEdgeTargetOffset = 0;
 
     #if (defined(EDGEALGORITHM) && EDGEALGORITHM==1)
     float _cooldown = 0.0f;
     unsigned long _lastEdgeTime=0;
     #endif
+
+    unsigned long _autoTimeStart = 0;
 } g_logic;
 
 class Sensor : Coroutine
@@ -256,8 +355,8 @@ class Vibrator : Coroutine
   protected:
     int8_t getStateDiff() const 
     { 
-        const int8_t fromStrength = clamp(static_cast<int8_t>(_currentState.mode), 0, MAX_LEVEL);
-        const int8_t toStrength = clamp(static_cast<int8_t>(_targetState.mode), 0, MAX_LEVEL);
+        const int8_t fromStrength = clamp<int8_t>(static_cast<int8_t>(_currentState.mode), 0, MAX_LEVEL);
+        const int8_t toStrength = clamp<int8_t>(static_cast<int8_t>(_targetState.mode), 0, MAX_LEVEL);
         return toStrength - fromStrength; 
       }
 } g_vibrator;
@@ -286,7 +385,7 @@ class LCD : public Coroutine
     typedef void (*lcdrender_t)();
     static lcdrender_t lcdrender_activefunc;
   protected:
-    void run_lcd_status(uint8_t state);
+    void run_lcd_status(MachineStates state);
   public:
     void Setup();
     void Update();
@@ -294,6 +393,8 @@ class LCD : public Coroutine
 
     template <typename T, typename I, int idx = 0, typename... Iremainder>
     static void setLCDFunc(T func, I arg, Iremainder... args);
+
+    static void lcdfunc_renderMenu();
     static void lcdfunc_edgeCount();
     static void lcdfunc_renderText();
     static void lcdfunc_renderTarget();
@@ -357,12 +458,14 @@ void LCD::Update()
   }
   else
   {
-    run_lcd_status(state);
+    run_lcd_status(g_logic.getState());
   }
 }
 
 void LCD::RenderPanic(const char* _str)
 {
+  Serial.println(_str);
+  Serial.flush();
   LCD::setLCDFunc(LCD::lcdfunc_renderText, _str);
   do
   {
@@ -378,42 +481,49 @@ void LCD::RenderPanic(const char* _str)
   }
 }
 
-void LCD::run_lcd_status(uint8_t state)
+void LCD::run_lcd_status(MachineStates state)
 {
-  static int8_t mode = 0;
-  static auto lastChange = millis();
-  const auto now = millis();
-
-  if ( (now - lastChange) > 5000 )
+  if (state == MachineStates::menu)
   {
-    mode++;
-    lastChange = now;
+    setLCDFunc(lcdfunc_renderMenu, 0);
   }
+  else
+  {
+    static int8_t mode = 0;
+    static auto lastChange = millis();
+    const auto now = millis();
 
-  if ( (now-lastTargetChange) < 15000 )
-  {
-    mode = 1;
-  }
-
-  if ( (now - lastEdgeCountChange) < 5000 )
-  {
-    mode = 2;
-  }
-  
-  switch (mode % 3)
-  {
-    case 0:
-      {
-        setLCDFunc(lcdfunc_renderPressure, g_pressure);
-      } break;
-    case 1:
-      {
-        setLCDFunc(lcdfunc_renderTarget, max(0, g_pressure - avgPressure), max(0, pLimit));
-      } break;
-    case 2:
+    if ( (now - lastChange) > 5000 )
     {
-      setLCDFunc(lcdfunc_edgeCount, edgeCount);
-    } break;
+      mode++;
+      lastChange = now;
+    }
+
+    if ( (now-lastTargetChange) < 15000 )
+    {
+      mode = 1;
+    }
+
+    if ( (now - lastEdgeCountChange) < 5000 )
+    {
+      mode = 2;
+    }
+    
+    switch (mode % 3)
+    {
+      case 0:
+        {
+          setLCDFunc(lcdfunc_renderPressure, g_pressure);
+        } break;
+      case 1:
+        {
+          setLCDFunc(lcdfunc_renderTarget, max(0, g_pressure - avgPressure), max(0, pLimit));
+        } break;
+      case 2:
+      {
+        setLCDFunc(lcdfunc_edgeCount, edgeCount);
+      } break;
+    }
   }
 }
 
@@ -436,6 +546,63 @@ void LCD::setLCDFunc(T func, I arg, Iremainder... args)
       u8g2.firstPage();
     }
   }
+}
+
+void LCD::lcdfunc_renderMenu()
+{
+#if 0
+  u8g2.setFont(font_13pt);
+  u8g2.setCursor(0, 20);
+
+  static String text;
+  text = g_MenuItemLabels[static_cast<uint8_t>(g_logic.getMenuItem())];
+  u8g2.print(text);
+#else
+  u8g2.setFont(font_13pt);
+  
+  uint8_t left = 2;
+  uint8_t top = 5;
+  uint8_t bottom = u8g2.getDisplayHeight() - 5;
+  uint8_t right = u8g2.getDisplayWidth() - 2;
+  u8g2.drawFrame(left, top, right-left, bottom-top);
+
+  static String text;
+
+  static char buffer[64];
+  getMenuItemLabels(g_logic.getMenuItem(), text);
+     
+  switch(g_logic.getMenuItem())
+  {
+    case MenuItemsEnum::automatic_input_time:
+    text += g_logic.getAutomaticInputTime();
+    text += "m";
+    break;
+    case MenuItemsEnum::automatic_input_min:
+    text += g_logic.getAutomaticInputMin();
+    break; 
+    case MenuItemsEnum::automatic_input_max:
+    text += g_logic.getAutomaticInputMax();
+    break; 
+  }
+
+  const auto textWidth = u8g2.getStrWidth(text.c_str());
+  u8g2.setCursor((u8g2.getDisplayWidth()/2) - (textWidth/2), 20);
+  u8g2.print(text);
+  
+  if (!g_logic.isMenuItemFirst())
+  {
+    u8g2.drawLine(left, 0, left, top-2);
+    u8g2.drawLine(left, top-2, right, top-2);
+    u8g2.drawLine(right, top-2, right, 0);
+  }
+
+  if (!g_logic.isMenuItemLast())
+  {
+    u8g2.drawLine(left, bottom+2, left, u8g2.getDisplayHeight());
+    u8g2.drawLine(left, bottom+2, right, bottom+2);
+    u8g2.drawLine(right, bottom+2, right, u8g2.getDisplayHeight());
+  }
+#endif
 }
 
 //static auto lastPressureChange = millis();
@@ -492,16 +659,14 @@ void LCD::lcdfunc_renderTarget()
 
 void LCD::lcdfunc_renderText()
 {
-  u8g2.setFont(font_13pt);
+  u8g2.setFont(lcdrenderdata[1].integer32 == 0 ? font_13pt : font_24pt);
   int y = u8g2.getMaxCharHeight();
-  for (const auto& data : lcdrenderdata)
+
+  if (lcdrenderdata[0].stringptr != nullptr)
   {
-    if (data.stringptr != nullptr)
-    {
-      u8g2.setCursor(10, y);
-      u8g2.print(data.stringptr);
-      y += u8g2.getMaxCharHeight();
-    }
+    u8g2.setCursor(10, y);
+    u8g2.print(lcdrenderdata[0].stringptr);
+    y += u8g2.getMaxCharHeight();
   }
 }
 
@@ -666,7 +831,7 @@ void Vibrator::vibrator_to(const int mode)
 { 
   if(mode > 0)
   {
-    _targetState.mode = clamp(mode-1, 0, MAX_LEVEL); 
+    _targetState.mode = clamp<int>(mode-1, 0, MAX_LEVEL); 
   }
 }
 
@@ -679,7 +844,7 @@ int Vibrator::map_motspeed_to_vibrator()
                                     uint8_t(0.13f * 255.0f), 
                                     uint8_t(0.11f * 255.0f)};
   static constexpr uint8_t speedCount = (sizeof(pct)/sizeof(pct[0]));
-  const uint8_t speed = (uint8_t)clamp(motSpeed, 0.0f, 255.0f);
+  const uint8_t speed = (uint8_t)clamp<float>(motSpeed, 0.0f, 255.0f);
   if (speed <= 1)
   {
     return 0;
@@ -958,30 +1123,44 @@ void Sensor::Setup()
 /////////////////////////////////////////////////////
 // Logic
 int Logic::sampleTick = 0;
-
 int Logic::runCoroutine()
     {
       COROUTINE_LOOP()
       {              
         fadeToBlackBy(leds,NUM_LEDS,20); //Create a fading light effect. LED buffer is not otherwise cleared
-        static uint8_t l_btnState = 0;
-        l_btnState = check_button();
+        _physBtnState = check_button();
+        if (_physBtnState == PhysBtnState::Long && _state != MachineStates::menu)
+        {
+          change_state(MachineStates::menu);
+        }
+#if 0
+        static auto l_newState = _state;
+        l_newState = set_state(l_btnState,_state); //Set the next state based on this state and button presses
 
-        static auto l_newState = state;
-        l_newState = set_state(l_btnState,state); //Set the next state based on this state and button presses
-
-        if (l_newState != state)
+        if (l_newState != _state)
         { //state changed
-          state = l_newState;
-          if (state == AUTO || state == MANUAL)
+          _state = l_newState;
+          bool isLogged = false;
+          switch (_state)
           {
-            SessionBeginEndCmd cmd;
-            cmd.SetValue((state == AUTO) ? true : false);
-            g_i2c.SendI2CCommand(&cmd);
-            resetSession();
+            case MachineStates::menu: { isLogged=false; } break;
+            case MachineStates::manual_motor_control: isLogged=false; [[fallthrough]]
+            case MachineStates::auto_edge_control:  isLogged=true; [[fallthrough]]
+            case MachineStates::manual_edge_control: {
+              isLogged = true;
+
+              SessionBeginEndCmd cmd;
+              cmd.SetValue(isLogged);
+              g_i2c.SendI2CCommand(&cmd);
+              resetSession();
+            } break;
+          }
+          if (_state == MachineStates::manual_edge_control || _state == MachineStates::manual_motor_control)
+          {
           }
         }
-        run_state_machine(l_newState);
+        #endif
+        run_state_machine(_state);
         FastLED.show(); //Update the physical LEDs to match the buffer in software
         COROUTINE_YIELD();
       }
@@ -996,6 +1175,16 @@ void Logic::Setup()
   sensitivity = EEPROM.read(SENSITIVITY_ADDR);
   maxSpeed = min(EEPROM.read(MAX_SPEED_ADDR), MOT_MAX); //Obey the MOT_MAX the first power  cycle after chaning it.
 
+    
+
+  _automatic_edge_time = clamp(EEPROM.get<int16_t>(AUTOEDGE_TIME_ADDR, _automatic_edge_time), int16_t(0), int16_t(1800));
+  _automatic_edge_mintarget = clamp(EEPROM.get<int16_t>(AUTOEDGE_MIN_ADDR, _automatic_edge_mintarget), int16_t(0), int16_t(1000));
+  _automatic_edge_maxtarget = clamp(EEPROM.get<int16_t>(AUTOEDGE_MAX_ADDR, _automatic_edge_maxtarget), int16_t(0), int16_t(1000));
+
+  _currentMenuItem = &g_rootMenu[1];
+  _currentMenuItemState.isFirst = true;
+  _currentMenuItemState.isLast = false;
+  change_state(MachineStates::menu);
   resetSession();
 }
 
@@ -1013,10 +1202,95 @@ void Logic::resetSession()
   _cooldown = DEFAULT_COOLDOWN_s;
   _lastEdgeTime = millis();
 #endif
+  _autoTimeStart = millis();
+}
+
+void Logic::run_menu()
+{
+  if (_physBtnState == PhysBtnState::Short)
+  {
+      switch (*_currentMenuItem)
+      {
+        case MenuItemsEnum::test: { change_state(MachineStates::manual_motor_control); } break;
+        case MenuItemsEnum::manual: { change_state(MachineStates::manual_edge_control); } break;
+        case MenuItemsEnum::automatic: { _currentMenuItem = &g_automaticMenu[1]; } break;
+        case MenuItemsEnum::automatic_start: { change_state(MachineStates::auto_edge_control); } break;
+        case MenuItemsEnum::automatic_input_time: { 
+          _readVariable = &_automatic_edge_time;
+          _readVariableMin = 5;
+          _readVariableMax = 120;
+          change_state(MachineStates::read_variable); 
+        } break;
+        case MenuItemsEnum::automatic_input_min: { 
+          _readVariable = &_automatic_edge_mintarget;
+          _readVariableMin = 0;
+          _readVariableMax = 1500;
+          change_state(MachineStates::read_variable); 
+        } break;
+        case MenuItemsEnum::automatic_input_max: { 
+          _readVariable = &_automatic_edge_maxtarget;
+          _readVariableMin = 0;
+          _readVariableMax = 1500;
+          change_state(MachineStates::read_variable); 
+        } break;
+        case MenuItemsEnum::automatic_back: { _currentMenuItem = &g_rootMenu[1]; } break;
+        case MenuItemsEnum::resetSession: { resetSession(); }; break;
+      }
+  }
+
+  _currentMenuItemState.isFirst = (*_currentMenuItem == MenuItemsEnum::INVALID) || (*(_currentMenuItem-1) == MenuItemsEnum::INVALID);
+  _currentMenuItemState.isLast = *(_currentMenuItem+1) == MenuItemsEnum::LAST;
+
+  const auto knob = myEnc.read();
+  const auto delta = knob - _menuKnobState;
+  if (delta >= 4)
+  {
+    if (!_currentMenuItemState.isLast)
+    {
+      _currentMenuItem++;
+    }
+    _menuKnobState = knob;
+  } else if (delta <= -4)
+  {
+    if (!_currentMenuItemState.isFirst)
+    {
+      _currentMenuItem--;
+    }
+    _menuKnobState = knob;
+  }
+}
+
+void Logic::run_read_variable()
+{
+  auto& var = *_readVariable;
+  static String displayTxt;
+  displayTxt = F("> ");
+  displayTxt += var;
+  displayTxt += F(" <");
+  LCD::setLCDFunc(LCD::lcdfunc_renderText, displayTxt.c_str());
+
+  const auto knob = myEnc.read();
+  const auto delta = knob - _menuKnobState;
+
+  if (delta >= 4)
+  {
+    var = clamp<int16_t>(++var, _readVariableMin, _readVariableMax);
+    _menuKnobState = knob;
+  } else if (delta <= -4)
+  {
+    var = clamp<int16_t>(--var, _readVariableMin, _readVariableMax);
+    _menuKnobState = knob;
+  }
+
+  //confirm, go back to menu.
+  if (_physBtnState == PhysBtnState::Short)
+  {
+    change_state(MachineStates::menu);
+  }
 }
 
 // Manual vibrator control mode (red), still shows orgasm closeness in background
-void Logic::run_manual() 
+void Logic::run_manual_motor_control() 
 {
   //In manual mode, only allow for 13 cursor positions, for adjusting motor speed.
   const int knob = encLimitRead(0,NUM_LEDS-1);
@@ -1040,16 +1314,28 @@ void Logic::run_manual()
   draw_cursor(knob, CRGB::Red);
 }
 
+void Logic::run_automatic_edge_control()
+{
+  const auto now = millis();
+  const auto elapsed = uint32_t(now - _autoTimeStart);
+  const auto timespan = uint32_t(_automatic_edge_time) * uint32_t(60) * uint32_t(1000);
+  const float progress = float(elapsed) / float(timespan);
+  _autoEdgeTargetOffset = _automatic_edge_mintarget + ((float)(_automatic_edge_maxtarget-_automatic_edge_mintarget) * progress);
+  _autoEdgeTargetOffset = clamp<float>(_autoEdgeTargetOffset, _automatic_edge_mintarget, _automatic_edge_maxtarget);
+}
+
 // Automatic edging mode, knob adjust sensitivity.
-void Logic::run_auto() 
+void Logic::run_manual_edge_control() 
 {
   static float motIncrement = 0.0;
   motIncrement = ((float)maxSpeed / ((float)FREQUENCY * (float)rampTimeS));
 
   const int knob = encLimitRead(0,(3*NUM_LEDS)-1);
   sensitivity = knob*4; //Save the setting if we leave and return to this state
-  //Reverse "Knob" to map it onto a pressure limit, so that it effectively adjusts sensitivity
-  pLimit = map(knob, 0, 3 * (NUM_LEDS - 1), DEFAULT_PLIMIT, 1); //set the limit of delta pressure before the vibrator turns off
+  //Reverse "Knob" to map it onto a pressure limit, so that it effectively adjusts sensitivity 
+  pLimit = max(0, map(knob, 0, 3 * (NUM_LEDS - 1), DEFAULT_PLIMIT, 1)); //set the limit of delta pressure before the vibrator turns off
+  pLimit += (int)_autoEdgeTargetOffset; 
+
   if (pLimit != pLimitLast)
   {
     pLimitLast = pLimit;
@@ -1069,15 +1355,15 @@ void Logic::run_auto()
       Serial.print(F("s -> "));
       if (diff >= 0.0f)
       { //Too slow
-        const float x = clamp(diff / DEFAULT_EDGETIME_TARGET_MAX_s, 0.0f, 1.0f);
+        const float x = clamp<float>(diff / DEFAULT_EDGETIME_TARGET_MAX_s, 0.0f, 1.0f);
         const float adjustment = ((pow(x-1.0f, 3.0f))+1.0f) * DEFAULT_COOLDOWN_ADJUSTMENT_FASTER_s;
         _cooldown -= adjustment;
       } else if (diff < 0.0f)
       { //Too fast!
-        const float x = clamp(1.0f - (edgeTime/DEFAULT_EDGETIME_TARGET_s), 0.0f, 1.0f);
+        const float x = clamp<float>(1.0f - (edgeTime/DEFAULT_EDGETIME_TARGET_s), 0.0f, 1.0f);
         _cooldown += (((pow(x-1.0f, 3.0f))+1.0f) * DEFAULT_COOLDOWN_ADJUSTMENT_SLOWER_s);
       }
-      _cooldown = clamp(_cooldown, DEFAULT_EDGETIME_TARGET_MIN_S, DEFAULT_EDGETIME_TARGET_MAX_s);
+      _cooldown = clamp<float>(_cooldown, DEFAULT_EDGETIME_TARGET_MIN_S, DEFAULT_EDGETIME_TARGET_MAX_s);
       _lastEdgeTime = millis();
       Serial.print(_cooldown);
       Serial.println(F("s."));
@@ -1118,10 +1404,10 @@ void Logic::run_auto()
 }
 
 //Poll the knob click button, and check for long/very long presses as well
-uint8_t Logic::check_button()
+PhysBtnState Logic::check_button()
 {
-  static uint8_t btnState = BTN_NONE;
-  btnState = BTN_NONE;
+  static PhysBtnState btnState = PhysBtnState::None;
+  btnState = PhysBtnState::None;
 
   static bool lastBtn = ENC_SW_UP;
   static unsigned long keyDownTime = 0;
@@ -1137,17 +1423,17 @@ uint8_t Logic::check_button()
   { //there was a keyup
     if ((millis() - keyDownTime) >= V_LONG_PRESS_MS)
     {
-      btnState = BTN_V_LONG;
+      btnState = PhysBtnState::VLong;
       keyDownTime = 0;
     }
     else if ((millis() - keyDownTime) >= LONG_PRESS_MS)
     {
-      btnState = BTN_LONG;
+      btnState = PhysBtnState::Long;
       keyDownTime = 0;
     }
     else
     {
-      btnState = BTN_SHORT;
+      btnState = PhysBtnState::Short;
       keyDownTime = 0;
     }
   }
@@ -1157,25 +1443,108 @@ uint8_t Logic::check_button()
 }
 
 //run the important/unique parts of each state. Also, set button LED color.
-void Logic::run_state_machine(uint8_t state)
+void Logic::run_state_machine(MachineStates state)
 {
   switch (state) {
-    case MANUAL:
-      run_manual();
+    case MachineStates::manual_motor_control:
+      run_manual_motor_control();
       break;
-    case AUTO:
-      run_auto();
+    case MachineStates::manual_edge_control:
+      run_manual_edge_control();
       break;
+    case MachineStates::auto_edge_control:
+    {
+      run_automatic_edge_control();
+      run_manual_edge_control();
+      break;
+    }
+    case MachineStates::menu: 
+      run_menu(); 
+      break;
+    case MachineStates::read_variable:
+    {
+      run_read_variable();
+    } break;
     default:
-      run_manual();
       break;
   }
 }
 
 //Switch between state machine states, and reset the encoder position as necessary
 //Returns the next state to run. Very long presses will turn the system off (sort of)
-uint8_t Logic::set_state(uint8_t btnState, uint8_t state)
+MachineStates Logic::change_state(MachineStates newState)
 {
+  auto oldState = _state;
+
+  if (oldState != newState)
+  {
+    switch(oldState)
+    {
+      case MachineStates::UNDEFINED: {} break;
+      case MachineStates::menu: {} break;
+      case MachineStates::read_variable: {} break;
+      case MachineStates::manual_motor_control: 
+      {
+      } break;
+      case MachineStates::manual_edge_control: 
+      {
+        EEPROM.update(SENSITIVITY_ADDR, sensitivity);
+      } break;
+      case MachineStates::auto_edge_control: 
+      {
+        EEPROM.update(SENSITIVITY_ADDR, sensitivity);
+        _autoEdgeTargetOffset = 0;
+      } break;
+      default: g_lcd.RenderPanic("State not implemented!"); break;
+    }
+
+    switch(newState)
+    {
+      case MachineStates::UNDEFINED: {} break;
+      case MachineStates::menu: 
+      {
+        _menuKnobState = myEnc.read();
+        g_vibrator.vibrator_off();
+      } break;
+      case MachineStates::read_variable: {} break;
+      case MachineStates::manual_motor_control: 
+      {
+        g_vibrator.vibrator_reset();
+        g_vibrator.vibrator_on();
+      } break;
+      case MachineStates::manual_edge_control: 
+      {
+        //Restore last sensitivity value:
+        sensitivity = EEPROM.read(SENSITIVITY_ADDR);
+        myEnc.write(sensitivity);
+        g_vibrator.vibrator_reset();
+        g_vibrator.vibrator_on();
+      } break;
+      case MachineStates::auto_edge_control: 
+      {
+        //Store target settings in eeprom:
+        EEPROM.put<int16_t>(AUTOEDGE_TIME_ADDR, _automatic_edge_time);
+        EEPROM.put<int16_t>(AUTOEDGE_MIN_ADDR, _automatic_edge_mintarget);
+        EEPROM.put<int16_t>(AUTOEDGE_MAX_ADDR, _automatic_edge_maxtarget);
+        if (_autoTimeStart==0)
+        {
+          _autoTimeStart = millis();
+        }
+
+        //Restore last sensitivity value:
+        sensitivity = EEPROM.read(SENSITIVITY_ADDR);
+        myEnc.write(sensitivity);
+        g_vibrator.vibrator_reset();
+        g_vibrator.vibrator_on();
+      } break;
+      default: g_lcd.RenderPanic("State not implemented!"); break;
+    }
+
+    _state = newState;
+    return _state;
+  }
+
+  #if 0
   if(btnState == BTN_NONE){
     return state;
   }
@@ -1185,32 +1554,33 @@ uint8_t Logic::set_state(uint8_t btnState, uint8_t state)
     fill_gradient_RGB(leds,0,CRGB::Black,NUM_LEDS-1,CRGB::Black);//Turn off LEDS
     FastLED.show();
     while(!digitalRead(ENC_SW))delay(1);
-    return MANUAL ;
+    return MachineStates::manual_motor_control;
   }
   else if(btnState == BTN_SHORT){
     switch(state){
-      case MANUAL:
+      case MachineStates::manual_motor_control:
         myEnc.write(sensitivity);//Whenever going into auto mode, keep the last sensitivity
         motSpeed = 0; //Also reset the motor speed to 0
-        return AUTO;
-      case AUTO:
+        return MachineStates::manual_edge_control;
+      case MachineStates::manual_edge_control:
         myEnc.write(0);//Whenever going into manual mode, set the speed to 0.
         motSpeed = 0;
         EEPROM.update(SENSITIVITY_ADDR, sensitivity);
-        return MANUAL;
+        return MachineStates::manual_motor_control;
     }
   }
   else if(btnState == BTN_LONG){
     switch (state) {
-      case MANUAL:
+      case MachineStates::manual_motor_control:
         myEnc.write(map(maxSpeed, 0, 255, 0, 4 * (NUM_LEDS))); //start at saved value
-        return AUTO;//OPT_SPEED;
-      case AUTO:
+        return MachineStates::manual_edge_control;//OPT_SPEED;
+      case MachineStates::manual_edge_control:
         myEnc.write(map(maxSpeed, 0, 255, 0, 4 * (NUM_LEDS))); //start at saved value
-        return MANUAL;//OPT_SPEED;
+        return MachineStates::manual_motor_control;//OPT_SPEED;
     }
   }
-  else return MANUAL;
+  else return MachineStates::manual_motor_control;
+  #endif
 }
 
 // I2C
@@ -1299,7 +1669,7 @@ void I2C::SendI2CCommand(Command* cmd)
   do
   {
     Wire.beginTransmission(0x43); 
-    const uint8_t written = Wire.write(buffer, clamp(sz, 0, 10));
+    const uint8_t written = Wire.write(buffer, clamp<int32_t>(sz, 0, 10));
     sz -= written;
     buffer += written;
     Wire.endTransmission();    /* stop transmitting */
@@ -1410,7 +1780,6 @@ void setup()
 //=======Main Loop=============================
 void loop() 
 {
-  static uint8_t state = MANUAL;
   static bool rendered = false;
 #if 0
   profile(0, [](){ g_sensor.runCoroutine(); });
