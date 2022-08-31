@@ -172,6 +172,7 @@ enum class MenuItemsEnum : uint8_t
   manual,
   automatic,
   automatic_start,
+  automatic_continue,
   automatic_input_time,
   automatic_input_min,
   automatic_input_max,
@@ -193,6 +194,7 @@ MenuItemsEnum g_rootMenu[] {
 MenuItemsEnum g_automaticMenu[] {
   MenuItemsEnum::INVALID,
   MenuItemsEnum::automatic_start,
+  MenuItemsEnum::automatic_continue,
   MenuItemsEnum::automatic_input_time,
   MenuItemsEnum::automatic_input_min,
   MenuItemsEnum::automatic_input_max,
@@ -208,6 +210,7 @@ const __FlashStringHelper& getMenuItemLabels(MenuItemsEnum pValue, String& outpu
     case MenuItemsEnum::manual: output = F("Mode: Manual Edging"); return;
     case MenuItemsEnum::automatic: output = F("Mode: Automatic"); return;
     case MenuItemsEnum::automatic_start: output = F("Start"); return;
+    case MenuItemsEnum::automatic_continue: output = F("Continue"); return;
     case MenuItemsEnum::automatic_input_time: output = F("Duration: "); return;
     case MenuItemsEnum::automatic_input_min: output = F("Start treshold: "); return;
     case MenuItemsEnum::automatic_input_max: output = F("End treshold: "); return;
@@ -224,9 +227,15 @@ T clamp(const T val, const T minVal, const T maxVal) { return (val<minVal) ? min
 //======= DEBUG ===============================
 #define DEBUG_LOG_ENABLED 0
 #define PROFILING_ENABLED 0
+
+#if defined(DEBUG_LOG_ENABLED) && DEBUG_LOG_ENABLED!=0
+#define DEBUG_ONLY(...) __VA_ARGS__
+#else
+#define DEBUG_ONLY(...) void(0)
+#endif
 void logI2C(String& output)
 {
-  #if defined(DEBUG_LOG_ENABLED) && DEBUG_LOG_ENABLED==1
+  /*
   output = "";
   output += g_tick;//(millis() / 1000.0); //Timestamp (s)
   output += (",");
@@ -240,7 +249,7 @@ void logI2C(String& output)
   output += (",");
   output += (pLimit);
   output += (F(",\r\n"));
-#endif
+  */
 }
 
 //=======EEPROM Addresses============================
@@ -291,7 +300,7 @@ class Logic : Coroutine
     bool isMenuItemFirst() const { return _currentMenuItemState.isFirst; }
     int16_t getAutomaticInputMax() const { return _automatic_edge_maxtarget; }
     int16_t getAutomaticInputMin() const { return _automatic_edge_mintarget; }
-    int16_t getAutomaticInputTime() const { return _automatic_edge_time; }
+    int16_t getAutomaticInputTimeMinutes() const { return _automatic_edge_time_minutes; }
     virtual int runCoroutine() override;
   private:
     static int sampleTick;
@@ -313,7 +322,7 @@ class Logic : Coroutine
 
     int16_t _automatic_edge_maxtarget = 0;
     int16_t _automatic_edge_mintarget = 0;
-    int16_t _automatic_edge_time = 0;
+    int16_t _automatic_edge_time_minutes = 0;
     int16_t _autoEdgeTargetOffset = 0;
 
     #if (defined(EDGEALGORITHM) && EDGEALGORITHM==1)
@@ -322,6 +331,8 @@ class Logic : Coroutine
     #endif
 
     unsigned long _autoTimeStart = 0;
+
+    bool _hasSession = false;
 } g_logic;
 
 class Sensor : Coroutine
@@ -574,7 +585,7 @@ void LCD::lcdfunc_renderMenu()
   switch(g_logic.getMenuItem())
   {
     case MenuItemsEnum::automatic_input_time:
-    text += g_logic.getAutomaticInputTime();
+    text += g_logic.getAutomaticInputTimeMinutes();
     text += "m";
     break;
     case MenuItemsEnum::automatic_input_min:
@@ -705,7 +716,9 @@ namespace bitmaps
 
   static constexpr uint8_t buffersz = max(max(sizeof(bitmaps::connected_bits), sizeof(bitmaps::heart_bits)),
                                                                        sizeof(bitmaps::heart_bits_crossed));
-  static uint8_t* buffer = (uint8_t*)malloc(buffersz);
+
+  uint8_t realBuffer[buffersz];
+  uint8_t* buffer = &realBuffer[0]; //(uint8_t*)malloc(buffersz);
 
   //vibe active or not:
   for(uint8_t i=0; i < sizeof(bitmaps::heart_bits); i++)
@@ -753,7 +766,7 @@ int Vibrator::runCoroutine()
       COROUTINE_DELAY(VIBRATOR_PUSH_DELAY);
       digitalWrite(PIN_VIBRATOR_ONOFF, LOW);
       COROUTINE_DELAY(VIBRATOR_PUSH_DELAY);
-      Serial.println(F("[VIBRATOR]\tTurned on"));
+      DEBUG_ONLY(Serial.println(F("[VIBRATOR]\tTurned on")));
     }
     else if (_currentState.powered == true && _targetState.powered == false)
     {
@@ -763,17 +776,17 @@ int Vibrator::runCoroutine()
       COROUTINE_DELAY(VIBRATOR_PUSH_DELAY);
       digitalWrite(PIN_VIBRATOR_ONOFF, LOW);
       COROUTINE_DELAY(VIBRATOR_PUSH_DELAY);
-      Serial.println(F("[VIBRATOR]\tTurned off"));
+      DEBUG_ONLY(Serial.println(F("[VIBRATOR]\tTurned off")));
     }
 
     if (_currentState.powered)
     {
       if (diff != 0)
       {
-        Serial.print(F("[VIBRATOR] "));
-        Serial.print(_currentState.mode);
-        Serial.print(F(" -> "));
-        Serial.println(_targetState.mode);
+        DEBUG_ONLY(Serial.print(F("[VIBRATOR] ")));
+        DEBUG_ONLY(Serial.print(_currentState.mode));
+        DEBUG_ONLY(Serial.print(F(" -> ")));
+        DEBUG_ONLY(Serial.println(_targetState.mode));
       }
       if (diff > 0)
       {
@@ -785,7 +798,7 @@ int Vibrator::runCoroutine()
           COROUTINE_DELAY(VIBRATOR_PUSH_DELAY);
           digitalWrite(PIN_VIBRATOR_UP, LOW);
           COROUTINE_DELAY(VIBRATOR_PUSH_DELAY);
-          Serial.println(F("[VIBRATOR]\tTurned UP"));
+          DEBUG_ONLY(Serial.println(F("[VIBRATOR]\tTurned UP")));
         }
       }
       else if (diff < 0)
@@ -798,7 +811,7 @@ int Vibrator::runCoroutine()
           COROUTINE_DELAY(VIBRATOR_PUSH_DELAY);
           digitalWrite(PIN_VIBRATOR_DOWN, LOW);
           COROUTINE_DELAY(VIBRATOR_PUSH_DELAY);
-          Serial.println(F("[VIBRATOR]\tTurned DOWN"));
+          DEBUG_ONLY(Serial.println(F("[VIBRATOR]\tTurned DOWN")));
         }
       }
     }
@@ -1133,33 +1146,7 @@ int Logic::runCoroutine()
         {
           change_state(MachineStates::menu);
         }
-#if 0
-        static auto l_newState = _state;
-        l_newState = set_state(l_btnState,_state); //Set the next state based on this state and button presses
 
-        if (l_newState != _state)
-        { //state changed
-          _state = l_newState;
-          bool isLogged = false;
-          switch (_state)
-          {
-            case MachineStates::menu: { isLogged=false; } break;
-            case MachineStates::manual_motor_control: isLogged=false; [[fallthrough]]
-            case MachineStates::auto_edge_control:  isLogged=true; [[fallthrough]]
-            case MachineStates::manual_edge_control: {
-              isLogged = true;
-
-              SessionBeginEndCmd cmd;
-              cmd.SetValue(isLogged);
-              g_i2c.SendI2CCommand(&cmd);
-              resetSession();
-            } break;
-          }
-          if (_state == MachineStates::manual_edge_control || _state == MachineStates::manual_motor_control)
-          {
-          }
-        }
-        #endif
         run_state_machine(_state);
         FastLED.show(); //Update the physical LEDs to match the buffer in software
         COROUTINE_YIELD();
@@ -1177,7 +1164,7 @@ void Logic::Setup()
 
     
 
-  _automatic_edge_time = clamp(EEPROM.get<int16_t>(AUTOEDGE_TIME_ADDR, _automatic_edge_time), int16_t(0), int16_t(1800));
+  _automatic_edge_time_minutes = clamp(EEPROM.get<int16_t>(AUTOEDGE_TIME_ADDR, _automatic_edge_time_minutes), int16_t(0), int16_t(1800));
   _automatic_edge_mintarget = clamp(EEPROM.get<int16_t>(AUTOEDGE_MIN_ADDR, _automatic_edge_mintarget), int16_t(0), int16_t(1000));
   _automatic_edge_maxtarget = clamp(EEPROM.get<int16_t>(AUTOEDGE_MAX_ADDR, _automatic_edge_maxtarget), int16_t(0), int16_t(1000));
 
@@ -1203,6 +1190,18 @@ void Logic::resetSession()
   _lastEdgeTime = millis();
 #endif
   _autoTimeStart = millis();
+
+  if (_hasSession) {
+    SessionBeginEndCmd cmd;
+    cmd.SetValue(0);
+    g_i2c.SendI2CCommand(&cmd);
+    delay(100);
+  }
+
+  SessionBeginEndCmd cmd;
+  cmd.SetValue(1);
+  g_i2c.SendI2CCommand(&cmd);
+  _hasSession = true;
 }
 
 void Logic::run_menu()
@@ -1212,11 +1211,12 @@ void Logic::run_menu()
       switch (*_currentMenuItem)
       {
         case MenuItemsEnum::test: { change_state(MachineStates::manual_motor_control); } break;
-        case MenuItemsEnum::manual: { change_state(MachineStates::manual_edge_control); } break;
+        case MenuItemsEnum::manual: { resetSession(); change_state(MachineStates::manual_edge_control); } break;
         case MenuItemsEnum::automatic: { _currentMenuItem = &g_automaticMenu[1]; } break;
-        case MenuItemsEnum::automatic_start: { change_state(MachineStates::auto_edge_control); } break;
+        case MenuItemsEnum::automatic_start: { resetSession(); change_state(MachineStates::auto_edge_control); } break;
+        case MenuItemsEnum::automatic_continue: { if (!_hasSession) { resetSession(); }; change_state(MachineStates::auto_edge_control); } break;
         case MenuItemsEnum::automatic_input_time: { 
-          _readVariable = &_automatic_edge_time;
+          _readVariable = &_automatic_edge_time_minutes;
           _readVariableMin = 5;
           _readVariableMax = 120;
           change_state(MachineStates::read_variable); 
@@ -1317,9 +1317,9 @@ void Logic::run_manual_motor_control()
 void Logic::run_automatic_edge_control()
 {
   const auto now = millis();
-  const auto elapsed = uint32_t(now - _autoTimeStart);
-  const auto timespan = uint32_t(_automatic_edge_time) * uint32_t(60) * uint32_t(1000);
-  const float progress = float(elapsed) / float(timespan);
+  const auto elapsedms = uint32_t(now - _autoTimeStart);
+  const auto timespanms = uint32_t(_automatic_edge_time_minutes) * uint32_t(60) * uint32_t(1000);
+  const float progress = float(elapsedms) / float(timespanms);
   _autoEdgeTargetOffset = _automatic_edge_mintarget + ((float)(_automatic_edge_maxtarget-_automatic_edge_mintarget) * progress);
   _autoEdgeTargetOffset = clamp<float>(_autoEdgeTargetOffset, _automatic_edge_mintarget, _automatic_edge_maxtarget);
 }
@@ -1350,9 +1350,9 @@ void Logic::run_manual_edge_control()
       const float edgeTime = static_cast<float>(millis()-_lastEdgeTime) / 1000.0f;
       const float diff = edgeTime - DEFAULT_EDGETIME_TARGET_s;
 
-      Serial.print(F("Adjusted cooldown: "));
-      Serial.print(_cooldown);
-      Serial.print(F("s -> "));
+      DEBUG_ONLY(Serial.print(F("Adjusted cooldown: ")));
+      DEBUG_ONLY(Serial.print(_cooldown));
+      DEBUG_ONLY(Serial.print(F("s -> ")));
       if (diff >= 0.0f)
       { //Too slow
         const float x = clamp<float>(diff / DEFAULT_EDGETIME_TARGET_MAX_s, 0.0f, 1.0f);
@@ -1365,10 +1365,10 @@ void Logic::run_manual_edge_control()
       }
       _cooldown = clamp<float>(_cooldown, DEFAULT_EDGETIME_TARGET_MIN_S, DEFAULT_EDGETIME_TARGET_MAX_s);
       _lastEdgeTime = millis();
-      Serial.print(_cooldown);
-      Serial.println(F("s."));
+      DEBUG_ONLY(Serial.print(_cooldown));
+      DEBUG_ONLY(Serial.println(F("s.")));
+      DEBUG_ONLY(Serial.flush());
       #endif
-
       g_vibrator.vibrator_off();
       g_vibrator.vibrator_reset();
       edgeCount++;
@@ -1523,7 +1523,7 @@ MachineStates Logic::change_state(MachineStates newState)
       case MachineStates::auto_edge_control: 
       {
         //Store target settings in eeprom:
-        EEPROM.put<int16_t>(AUTOEDGE_TIME_ADDR, _automatic_edge_time);
+        EEPROM.put<int16_t>(AUTOEDGE_TIME_ADDR, _automatic_edge_time_minutes);
         EEPROM.put<int16_t>(AUTOEDGE_MIN_ADDR, _automatic_edge_mintarget);
         EEPROM.put<int16_t>(AUTOEDGE_MAX_ADDR, _automatic_edge_maxtarget);
         if (_autoTimeStart==0)
@@ -1605,6 +1605,17 @@ int I2C::runCoroutine()
   #if 1
   COROUTINE_LOOP()
   {
+    static CSVLogCommand *cmd = nullptr;
+    cmd = new CSVLogCommand();
+    if (cmd != nullptr)
+    {
+      //cmd->LogCSV(g_tick, g_tick);
+      cmd->LogCSV(g_tick, int32_t(motSpeed), int32_t(g_pressure), int32_t(avgPressure), int32_t(g_pressure - avgPressure), int32_t(pLimit));
+      g_i2c.SendI2CCommand(cmd);
+    }
+    delete (cmd);
+    cmd=nullptr;
+    #if 0
     static String i2cstring;
     logI2C(i2cstring);
     #if defined(DEBUG_LOG_ENABLED) && DEBUG_LOG_ENABLED==1
@@ -1626,6 +1637,9 @@ int I2C::runCoroutine()
     {
       Serial.println(F("Out of Memory!"));
     }
+    #endif
+
+
     COROUTINE_DELAY(250);
     COROUTINE_YIELD();
   }
@@ -1767,14 +1781,14 @@ void profile(int storageID, ProfiledFunc profiledFunc)
 void setup() 
 {
   Wire.setWireTimeout(50000, true);
-
-  Serial.begin(230400); delay(100); Serial.println(F("Serial up")); Serial.flush();
-  g_sensor.Setup();  delay(100); Serial.println(F("Sensor up")); Serial.flush();
-  g_logic.Setup();  delay(100); Serial.println(F("Logic up")); Serial.flush();
-  g_lcd.Setup();  delay(100); Serial.println(F("LCD up")); Serial.flush();
-  g_leds.Setup();  delay(100); Serial.println(F("LEDS up")); Serial.flush();
-  g_vibrator.Setup();  delay(100); Serial.println(F("Vibrator up")); Serial.flush();
-  g_i2c.Setup();  delay(100); Serial.println(F("i2C up")); Serial.flush();
+  Serial.begin(230400); delay(100); DEBUG_ONLY(Serial.println(F("Serial up"))); Serial.flush();
+  g_sensor.Setup();  delay(100); DEBUG_ONLY(Serial.println(F("Sensor up"))); Serial.flush();
+  g_logic.Setup();  delay(100); DEBUG_ONLY(Serial.println(F("Logic up"))); Serial.flush();
+  g_lcd.Setup();  delay(100); DEBUG_ONLY(Serial.println(F("LCD up"))); Serial.flush();
+  g_leds.Setup();  delay(100); DEBUG_ONLY(Serial.println(F("LEDS up"))); Serial.flush();
+  g_vibrator.Setup();  delay(100); DEBUG_ONLY(Serial.println(F("Vibrator up"))); Serial.flush();
+  g_i2c.Setup();  delay(100); DEBUG_ONLY(Serial.println(F("i2C up"))); Serial.flush();
+  Serial.println(F("Started up"));
 }
 
 //=======Main Loop=============================
