@@ -1,17 +1,20 @@
 #pragma once
 #include "commandmanager.h"
+enum class CommandID : uint8_t
+{
+  UNDEFINED,
+  Print,
+  CSVLog,
+  SessionBeginEnd,
+};
+
+#include "csvlogcommand.h"
 ////////////////////////////////////////////////////////////////////////////
 //DO NOT DEOPTIMIZE HERE!!!
 //#pragma GCC push_options
 //#pragma GCC optimize ("O0")
 
-enum class CommandID : uint8_t
-{
-  UNDEFINED,
-  Print,
-  SessionBeginEnd,
-};
-
+#if 0
 class PrintCmd : public Command
 {
 public:
@@ -46,6 +49,7 @@ public:
 private:
   char* &ptr = reinterpret_cast<char*&>(_buffer);
 };
+#endif
 
 class SessionBeginEndCmd : public Command
 {public:
@@ -69,7 +73,8 @@ struct
   {
     Inner()
     {
-      CommandAssembler::RegisterCommand<static_cast<uint8_t>(CommandID::Print)>([]()->Command*{ return new PrintCmd(); });
+      //CommandAssembler::RegisterCommand<static_cast<uint8_t>(CommandID::Print)>([]()->Command*{ return new PrintCmd(); });
+      CommandAssembler::RegisterCommand<static_cast<uint8_t>(CommandID::CSVLog)>([]()->Command*{ return new CSVLogCommand(); });
       CommandAssembler::RegisterCommand<static_cast<uint8_t>(CommandID::SessionBeginEnd)>([]()->Command*{ return new SessionBeginEndCmd(); });
     }
   } _innerMe;

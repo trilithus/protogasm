@@ -1,0 +1,351 @@
+diff --git a/nogasm_code/nogasm_code.ino b/nogasm_code/nogasm_code.ino
+index 98eb828..7b26585 100755
+--- a/nogasm_code/nogasm_code.ino
++++ b/nogasm_code/nogasm_code.ino
+@@ -36,11 +36,15 @@
+  * (RGB 255,255,255) It may overheat the voltage regulator and cause the board 
+  * to reset.
+  */
++// SDK
++#include <limits.h>
++
+ //=======Libraries===============================
+ #include <Encoder.h>
+ #include <EEPROM.h>
+ #include "FastLED.h"
+ #include "RunningAverageT.h"
++#include <AceRoutine.h>
+ 
+ //Running pressure average array length and update frequency
+ #define RA_HIST_SECONDS 25 //25
+@@ -52,11 +56,12 @@ RunningAverageT<unsigned short, RA_FREQUENCY*RA_HIST_SECONDS> raPressure;
+ #define U8X8_HAVE_HW_I2C
+ #include <Arduino.h>
+ #include <U8g2lib.h>
+-#ifdef U8X8_HAVE_HW_I2C
+-#include <Wire.h>
+-#endif
+-
+ 
++//Command manager:
++#include <Wire.h>
++//#define HAS_COMMAND_MANAGER 1
++//#include "commandmanager.h"
++//#include "sharedcommands.h"
+ 
+ #if 1
+ #define font_13pt u8g2_font_6x13_tr
+@@ -142,6 +147,28 @@ float motSpeed = 0; //Motor speed, 0-255 (float to maintain smooth ramping to lo
+ uint16_t edgeCount = 0;
+ auto lastEdgeCountChange = millis();
+ 
++//=======I2C Commands============================
++#if defined(HAS_COMMAND_MANAGER) && HAS_COMMAND_MANAGER==1
++void sendI2CCommand(Command* cmd)
++{
++  //Request a data to allow the logger to be ready, and then make sure
++  //we wait.
++  Wire.requestFrom(8, 1);
++  while(Wire.available())
++  {
++    Serial.println(Wire.read());
++  }
++
++  //Start submitting the command:
++  Wire.beginTransmission(8); /* begin with device address 8 */
++  Wire.write(static_cast<unsigned int>(cmd->cmdId));
++  uint32_t sz = cmd->GetBufferSize();
++  Wire.write(reinterpret_cast<const uint8_t*>(&sz), sizeof(sz));
++  Wire.write(reinterpret_cast<const uint8_t*>(cmd->GetBuffer()), sz);
++  Wire.endTransmission();    /* stop transmitting */
++}
++#endif
++
+ //======= DEBUG ===============================
+ #define DEBUG_LOG_ENABLED 0
+ void logDebug()
+@@ -171,6 +198,22 @@ void logDebug()
+ #endif
+ }
+ 
++void logI2C(String& output)
++{
++  output += (millis() / 1000.0); //Timestamp (s)
++  output += (F(","));
++  output += (motSpeed); //Motor speed (0-255)
++  output += (F(","));
++  output += (pressure); //(Original ADC value - 12 bits, 0-4095)
++  output += (F(","));
++  output += (avgPressure); //Running average of (default last 25 seconds) pressure
++  output += (F(","));
++  output += (pressure - avgPressure);
++  output += (F(","));
++  output += (pLimit);
++  output += "\n";
++}
++
+ //=======EEPROM Addresses============================
+ //128b available on teensy LC
+ #define BEEP_ADDR         1
+@@ -186,12 +229,14 @@ union lcdrenderdata_t
+   int32_t integer32;
+   const char* stringptr;
+ 
+-  operator =(const int32_t arg) {
++  int operator =(const int32_t arg) {
+     integer32 = arg;
++    return arg;
+   }
+ 
+-  operator =(const char* arg) {
++  const char*  operator =(const char* arg) {
+     stringptr = arg;
++    return arg;
+   }
+ } lcdrenderdata[2]{};
+ 
+@@ -331,14 +376,15 @@ void beep_motor(int f1, int f2, int f3) {
+   */
+ }
+ void setup() {
++  //Wire.begin();                 /* join i2c bus with address 8 */
++  //Serial.begin(9600);           /* start serial for debug */
++  //Wire.setClock(30);
++  //Wire.setTimeout(1e6*10);
++  //Wire.setWireTimeout(0, false);
++  Serial.println(F_CPU);
++
+   u8g2.begin();
+-  /*
+-  u8g2.setFont(u8g2_font_ncenB14_tr);
+-  u8g2.firstPage();
+-  do {
+-    u8g2.setCursor(0, 20);
+-    u8g2.print(F("Hello World!"));
+-  } while ( u8g2.nextPage() );*/
++
+   setLCDFunc(lcdfunc_renderText, __DATE__, __TIME__);
+   do {
+     lcdrender_activefunc();
+@@ -399,6 +445,16 @@ void setup() {
+ }
+ 
+ //=======Vibrator Control=================
++class Vibrator
++{
++  struct
++  {
++    bool powered = false;
++    uint8_t level = 0;
++  } _currentState, _targetState;
++  public:
++  void update();
++}
+ static int clamp(const int val, const int minVal, const int maxVal) { return max(min(val, maxVal), minVal); };
+ static uint8_t g_vibrator_mode = 0; //off
+ void set_vibrator_mode(int fromStrength, int toStrength)
+@@ -412,7 +468,7 @@ void set_vibrator_mode(int fromStrength, int toStrength)
+     digitalWrite(PIN_VIBRATOR_ONOFF, HIGH);
+     delay(VIBRATOR_PUSH_DELAY);
+     digitalWrite(PIN_VIBRATOR_ONOFF, LOW);
+-    delay(VIBRATOR_PUSH_DELAY);
++
+     Serial.println(F("[VIBRATOR]\tTurned on"));
+     //consume increase;
+     fromStrength++;
+@@ -427,7 +483,6 @@ void set_vibrator_mode(int fromStrength, int toStrength)
+       digitalWrite(PIN_VIBRATOR_UP, HIGH);
+       delay(VIBRATOR_PUSH_DELAY);
+       digitalWrite(PIN_VIBRATOR_UP, LOW);
+-      delay(VIBRATOR_PUSH_DELAY);
+       Serial.println(F("[VIBRATOR]\tTurned UP"));
+     }
+   }
+@@ -439,7 +494,6 @@ void set_vibrator_mode(int fromStrength, int toStrength)
+       digitalWrite(PIN_VIBRATOR_DOWN, HIGH);
+       delay(VIBRATOR_PUSH_DELAY);
+       digitalWrite(PIN_VIBRATOR_DOWN, LOW);
+-      delay(VIBRATOR_PUSH_DELAY);
+       Serial.println(F("[VIBRATOR]\tTurned DOWN"));
+     }    
+   }
+@@ -450,7 +504,6 @@ void set_vibrator_mode(int fromStrength, int toStrength)
+     digitalWrite(PIN_VIBRATOR_ONOFF, HIGH);
+     delay(VIBRATOR_PUSH_DELAY);
+     digitalWrite(PIN_VIBRATOR_ONOFF, LOW);
+-    delay(VIBRATOR_PUSH_DELAY);
+     Serial.println(F("[VIBRATOR]\tTurned OFF"));
+   }
+ 
+@@ -753,11 +806,147 @@ uint8_t set_state(uint8_t btnState, uint8_t state){
+ }
+ 
+ //=======Main Loop=============================
++  enum class TimeSlice : uint8_t
++  {
++    sensor,
++    logic,
++    lcd,
++    i2c,
++    LAST,
++  };
++
+ void loop() {
+   static uint8_t state = MANUAL;
+   static int sampleTick = 0;
+   static bool rendered = false;
+ 
++  static TimeSlice timeslice = TimeSlice::sensor;
++  uint8_t& timesliceID = (uint8_t&)timeslice;
++
++  static auto lastTime = 0;
++  const auto time = micros();
++  const auto timeMillis = millis();
++  const auto elapsed = [&](){
++    if (time >= lastTime)
++    {
++      return time - lastTime;
++    } else
++    {
++      return (ULONG_MAX-lastTime)+time;
++    }
++  }();
++
++  static uint32_t tick = 0;
++  static int32_t tickaccumulator = 0;
++  tickaccumulator += elapsed;
++  if (tickaccumulator >= 1e6/60)
++  {
++    tickaccumulator -= 1e6/60;
++    tick++;
++  }
++  
++  static uint32_t s_durations[static_cast<uint8_t>(TimeSlice::LAST)]{0,0,0,0};
++  static uint32_t s_max[static_cast<uint8_t>(TimeSlice::LAST)]{0,0,0,0};
++  switch (timeslice)
++  {
++    case TimeSlice::sensor:
++    {
++      static uint32_t lastTick = 0;
++      static auto lastSampleTime = time / 1000;
++
++      if (lastTick != tick)
++      {
++        lastTick = tick;
++        if (tick % RA_TICK_PERIOD == 0)
++        {
++          raPressure.addValue(pressure);
++          avgPressure = raPressure.getAverage();
++        }
++
++        pressure = 0;
++        for (uint8_t i = OVERSAMPLE; i; --i)
++        {
++          pressure += analogRead(BUTTPIN);
++          if (i)
++          {           // Don't delay after the last sample
++            delay(1); // Spread samples out a little
++          }
++        }
++      }
++    } break;
++    case TimeSlice::logic:
++    {
++      fadeToBlackBy(leds,NUM_LEDS,20); //Create a fading light effect. LED buffer is not otherwise cleared
++      uint8_t btnState = check_button();
++      const auto newState = set_state(btnState,state); //Set the next state based on this state and button presses
++      if (newState != state)
++      { //state changed
++        if (state == AUTO)
++        {
++          //g_Storage.BeginSession();
++        }
++      }
++      run_state_machine(newState);
++      FastLED.show(); //Update the physical LEDs to match the buffer in software
++
++      //Alert that the Pressure voltage amplifier is railing, and the trim pot needs to be adjusted
++      if(pressure > 4030)beep_motor(2093,2093,2093); //Three high beeps
++    } break;
++    case TimeSlice::lcd:
++    {
++      run_lcd_status(state);
++      if (lcdrender_activefunc != nullptr)
++      {
++        lcdrender_activefunc();
++        if (!u8g2.nextPage())
++        {
++          memset(&lcdrenderdata[0], 0, sizeof(lcdrenderdata));
++          lcdrender_activefunc = nullptr;
++        }
++        rendered = true;
++      }
++    } break;
++    case TimeSlice::i2c:
++    {
++#if defined(HAS_COMMAND_MANAGER) && HAS_COMMAND_MANAGER == 1
++      //Send results over I2C
++      {
++        String i2cstring;
++        logI2C(i2cstring);
++        PrintCmd cmd;
++        cmd.SetString(i2cstring.c_str());
++        sendI2CCommand(&cmd);
++      }
++#endif
++    }
++    break;
++    default:
++    {
++
++    } break;
++  };
++
++  //Debug:
++  {
++    const auto elapsed = millis()-timeMillis;
++    s_durations[timesliceID] += elapsed;
++    s_durations[timesliceID] /= 2;
++    s_max[timesliceID] = max(s_max[timesliceID], elapsed);
++
++    static auto lastDebugPrint = millis();
++    if (millis() > lastDebugPrint+1000)
++    {
++      lastDebugPrint = millis();
++      Serial.println("TICK");
++      /*sensor*/ Serial.print("avg: "); Serial.print(s_durations[0]); Serial.print(":"); Serial.println(s_max[0]);
++      /*logic*/ Serial.print("avg: "); Serial.print(s_durations[1]);  Serial.print(":"); Serial.println(s_max[1]);
++      /*lcd*/ Serial.print("avg: "); Serial.print(s_durations[2]);  Serial.print(":"); Serial.println(s_max[2]);
++      /*i2c*/ Serial.print("avg: "); Serial.print(s_durations[3]);  Serial.print(":"); Serial.println(s_max[3]);
++    }
++  }
++
++  timesliceID = (timesliceID+1) % static_cast<uint8_t>(TimeSlice::LAST); 
++#if 0
+   //Run this section at the update frequency (default 60 Hz)
+   if (millis() % period == 0) {
+     delay(1);
+@@ -791,6 +980,17 @@ void loop() {
+     //Alert that the Pressure voltage amplifier is railing, and the trim pot needs to be adjusted
+     if(pressure > 4030)beep_motor(2093,2093,2093); //Three high beeps
+ 
++    #if defined(HAS_COMMAND_MANAGER) && HAS_COMMAND_MANAGER==1
++    //Send results over I2C
++    {
++      String i2cstring;
++      logI2C(i2cstring);
++      PrintCmd cmd;
++      cmd.SetString(i2cstring.c_str());
++      sendI2CCommand(&cmd);
++    }
++    #endif
++
+     //Report pressure and motor data over USB for analysis / other uses. timestamps disabled by default
+     logDebug();
+ 
+@@ -810,4 +1010,5 @@ void loop() {
+       rendered = true;
+     }
+   }
++  #endif
+ }
