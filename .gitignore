@@ -1,3 +1,4 @@
 */.vscode/*
 case/stl/*.pdf
 build
+dataprocessing/temp/*
