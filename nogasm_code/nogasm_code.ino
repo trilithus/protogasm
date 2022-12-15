@@ -153,13 +153,13 @@ CRGB leds[NUM_LEDS];
 int g_pressure = 0;
 int avgPressure = 0; //Running 25 second average pressure
 //int bri =100; //Brightness setting
-int rampTimeS = 120; //Ramp-up time, in seconds
+int rampTimeS = 150; //120; //Ramp-up time, in seconds
 float s_cooldownTime = 0.40f;//0.5f;
 #define DEFAULT_PLIMIT 900
 int pLimit = DEFAULT_PLIMIT; //Limit in change of pressure before the vibrator turns off
 int pLimitLast = DEFAULT_PLIMIT;
-int maxSpeed = 255; //maximum speed the motor will ramp up to in automatic mode
-float motSpeed = 0; //Motor speed, 0-255 (float to maintain smooth ramping to low speeds)
+int g_MaxSpeed = 255; //maximum speed the motor will ramp up to in automatic mode
+float g_motSpeed = 0; //Motor speed, 0-255 (float to maintain smooth ramping to low speeds)
 uint16_t edgeCount = 0;
 auto lastEdgeCountChange = millis();
 static uint32_t g_tick = 0;
@@ -239,7 +239,7 @@ void logI2C(String& output)
   output = "";
   output += g_tick;//(millis() / 1000.0); //Timestamp (s)
   output += (",");
-  output += (motSpeed); //Motor speed (0-255)
+  output += (g_motSpeed); //Motor speed (0-255)
   output += (",");
   output += (g_pressure); //(Original ADC value - 12 bits, 0-4095)
   output += (",");
@@ -325,14 +325,15 @@ class Logic : Coroutine
     int16_t _automatic_edge_time_minutes = 0;
     int16_t _autoEdgeTargetOffset = 0;
 
-    #if (defined(EDGEALGORITHM) && EDGEALGORITHM==1)
-    float _cooldown = 0.0f;
-    unsigned long _lastEdgeTime=0;
-    #endif
-
     unsigned long _autoTimeStart = 0;
 
     bool _hasSession = false;
+    #if (defined(EDGEALGORITHM) && EDGEALGORITHM==1)
+    float _cooldown = 0.0f;
+    unsigned long _lastEdgeTime=0;
+    public:
+      float GetCooldown() const { return _cooldown; }
+    #endif
 } g_logic;
 
 class Sensor : Coroutine
@@ -723,7 +724,7 @@ namespace bitmaps
   //vibe active or not:
   for(uint8_t i=0; i < sizeof(bitmaps::heart_bits); i++)
   {
-    buffer[i] = pgm_read_byte_near((motSpeed >= 0.01f ? bitmaps::heart_bits : bitmaps::heart_bits_crossed) +i);
+    buffer[i] = pgm_read_byte_near((g_motSpeed >= 0.01f ? bitmaps::heart_bits : bitmaps::heart_bits_crossed) +i);
   }
   u8g2.drawXBM(u8g2.getDisplayWidth() - heart_width, 0, heart_width, heart_height, buffer);
 
@@ -850,21 +851,21 @@ void Vibrator::vibrator_to(const int mode)
 
 int Vibrator::map_motspeed_to_vibrator()
 {
-  static constexpr uint8_t pct[] = {uint8_t(0.25f * 255.0f),
+  static constexpr uint8_t pct[] = {uint8_t(0.35f * 255.0f),
                                     uint8_t(0.21f * 255.0f), 
                                     uint8_t(0.17f * 255.0f), 
-                                    uint8_t(0.13f * 255.0f), 
-                                    uint8_t(0.13f * 255.0f), 
-                                    uint8_t(0.11f * 255.0f)};
+                                    uint8_t(0.10f * 255.0f), 
+                                    uint8_t(0.10f * 255.0f), 
+                                    uint8_t(0.07f * 255.0f)};
   static constexpr uint8_t speedCount = (sizeof(pct)/sizeof(pct[0]));
-  const uint8_t speed = (uint8_t)clamp<float>(motSpeed, 0.0f, 255.0f);
+  const uint8_t speed = (uint8_t)clamp<float>(g_motSpeed, 0.0f, 255.0f);
   if (speed <= 1)
   {
     return 0;
-  } else if(speed >= maxSpeed)
+  } else if(speed >= g_MaxSpeed)
   {
     //Go back, as to not overstimulate.
-    motSpeed = 2.0f;
+    g_motSpeed = 2.0f;
   }
 
   //Map motSpeed to index:
@@ -880,118 +881,6 @@ int Vibrator::map_motspeed_to_vibrator()
     lastValue += pct[i];
   }
   return -1;
-
-  #if 0
-  #if 0
-  constexpr float pct[] = { 0.25, 0.21, 0.17, 0.13, 0.13, 0.11 };
-  constexpr uint8_t speedCount = (sizeof(pct)/sizeof(pct[0]));
-  constexpr uint8_t ranges[speedCount+1][2] = {
-    { 0.0f, 1.0f },
-    { 1.0f, pct[0]*255.0f},
-    { (pct[0]*255.0f), (pct[0]*255.0f) + (pct[1]*255.0f)},
-    { (pct[0]*255.0f) + (pct[1]*255.0f), (pct[0]*255.0f) + (pct[1]*255.0f) +  (pct[2]*255.0f)},
-    { (pct[0]*255.0f) + (pct[1]*255.0f) + (pct[2]*255.0f), (pct[0]*255.0f) + (pct[1]*255.0f) +  (pct[2]*255.0f) + (pct[3]*255.0f)},
-    { (pct[0]*255.0f) + (pct[1]*255.0f) + (pct[2]*255.0f) + (pct[3]*255.0f), (pct[0]*255.0f) + (pct[1]*255.0f) +  (pct[2]*255.0f) + (pct[3]*255.0f) + (pct[4]*255.0f)},
-    { (pct[0]*255.0f) + (pct[1]*255.0f) + (pct[2]*255.0f) + (pct[3]*255.0f) + (pct[4]*255.0f), (pct[0]*255.0f) + (pct[1]*255.0f) +  (pct[2]*255.0f) + (pct[3]*255.0f) + (pct[4]*255.0f) + (pct[5]*255.0f)}
-  };
-  #if 0
-  static bool initialized = false;
-  if(!initialized)
-  {
-    initialized = true;
-
-    //Off:
-    ranges[0][0] = 0;
-    ranges[0][1] = 1;
-    unsigned int lastValue = 1;
-    
-    //1,2,3,4 speed settinsg:
-    for(auto i=0; i < speedCount; i++)
-    {
-      ranges[1+i][0] = lastValue;
-      ranges[1+i][1] = static_cast<uint8_t>(clamp(lastValue + static_cast<int>(pct[i] * 255.0f), 0, 255));
-      lastValue = ranges[1+i][1];
-    }
-#if 0
-    for(auto i=0; i < speedCount+1; i++)
-    {
-      Serial.print(F("["));
-      Serial.print(i);
-      Serial.print(F("] "));
-      Serial.print(ranges[i][0]);
-      Serial.print(F("-"));
-      Serial.println(ranges[i][1]);
-    }
-#endif
-  }
-  #endif
-
-  if(motSpeed >= maxSpeed)
-  {
-    //Go back, as to not overstimulate.
-    motSpeed = ranges[2][0];
-  }
-
-  //Map motSpeed to index:
-  for (auto i=0; i < speedCount+1; i++)
-  {
-    if (motSpeed >= ranges[i][0] && motSpeed < ranges[i][1])
-    {
-      return i;
-    }
-  }
-  return -1;
-  #endif
-
-  constexpr float pct[] = { 0.25f * 255.0f, 0.21f * 255.0f, 0.17f * 255.0f, 0.13f * 255.0f, 0.13f * 255.0f, 0.11f * 255.0f };
-  constexpr uint8_t speedCount = (sizeof(pct)/sizeof(pct[0]));
-  static float ranges[speedCount+1][2];
-  static bool initialized = false;
-  if(!initialized)
-  {
-    initialized = true;
-
-    //Off:
-    ranges[0][0] = 0;
-    ranges[0][1] = 1;
-    float lastValue = 1.0f;
-    
-    //1,2,3,4 speed settinsg:
-    for(auto i=0; i < speedCount; i++)
-    {
-      ranges[1+i][0] = lastValue;
-      ranges[1+i][1] = clamp(lastValue + pct[i], 0.0f, 255.0f);
-      lastValue = ranges[1+i][1];
-    }
-#if 0
-    for(auto i=0; i < speedCount+1; i++)
-    {
-      Serial.print(F("["));
-      Serial.print(i);
-      Serial.print(F("] "));
-      Serial.print(ranges[i][0]);
-      Serial.print(F("-"));
-      Serial.println(ranges[i][1]);
-    }
-#endif
-  }
-
-    if(motSpeed >= (float)maxSpeed)
-  {
-    //Go back, as to not overstimulate.
-    motSpeed = ranges[2][0];
-  }
-
-  //Map motSpeed to index:
-  for (auto i=0; i < speedCount+1; i++)
-  {
-    if (motSpeed >= ranges[i][0] && motSpeed < ranges[i][1])
-    {
-      return i;
-    }
-  }
-  return -1;
-  #endif
 };
 /////////////////////////////////////////////////////
 // LEDs
@@ -1160,7 +1049,7 @@ void Logic::Setup()
 
   //Storage:
   sensitivity = EEPROM.read(SENSITIVITY_ADDR);
-  maxSpeed = min(EEPROM.read(MAX_SPEED_ADDR), MOT_MAX); //Obey the MOT_MAX the first power  cycle after chaning it.
+  g_MaxSpeed = min(EEPROM.read(MAX_SPEED_ADDR), MOT_MAX); //Obey the MOT_MAX the first power  cycle after chaning it.
 
     
 
@@ -1294,7 +1183,7 @@ void Logic::run_manual_motor_control()
 {
   //In manual mode, only allow for 13 cursor positions, for adjusting motor speed.
   const int knob = encLimitRead(0,NUM_LEDS-1);
-  motSpeed = map(knob, 0, NUM_LEDS - 1, 0., (float)MOT_MAX);
+  g_motSpeed = map(knob, 0, NUM_LEDS - 1, 0., (float)MOT_MAX);
 
   const auto setting = g_vibrator.map_motspeed_to_vibrator();
   if (setting > 0)
@@ -1328,7 +1217,7 @@ void Logic::run_automatic_edge_control()
 void Logic::run_manual_edge_control() 
 {
   static float motIncrement = 0.0;
-  motIncrement = ((float)maxSpeed / ((float)FREQUENCY * (float)rampTimeS));
+  motIncrement = ((float)g_MaxSpeed / ((float)FREQUENCY * (float)rampTimeS));
 
   const int knob = encLimitRead(0,(3*NUM_LEDS)-1);
   sensitivity = knob*4; //Save the setting if we leave and return to this state
@@ -1343,7 +1232,7 @@ void Logic::run_manual_edge_control()
   }
   //When someone clenches harder than the pressure limit
   if (g_pressure - avgPressure > pLimit) {
-    if (motSpeed > 0.0f)
+    if (g_motSpeed > 0.0f)
     {
       #if (defined(EDGEALGORITHM) && EDGEALGORITHM==1)
       //Adjust cooldown
@@ -1376,14 +1265,14 @@ void Logic::run_manual_edge_control()
     }
 
     #if !defined(EDGEALGORITHM) || EDGEALGORITHM==0
-    motSpeed = -s_cooldownTime*(float)rampTimeS*((float)FREQUENCY*motIncrement);//Stay off for a while (half the ramp up time)
+    g_motSpeed = -s_cooldownTime*(float)rampTimeS*((float)FREQUENCY*motIncrement);//Stay off for a while (half the ramp up time)
     #elif (defined(EDGEALGORITHM) && EDGEALGORITHM==1)
-    motSpeed = -_cooldown*((float)FREQUENCY*motIncrement);
+    g_motSpeed = -_cooldown*((float)FREQUENCY*motIncrement);
     #endif
     
   }
-  else if (motSpeed < (float)maxSpeed) {
-    motSpeed += motIncrement;
+  else if (g_motSpeed < (float)g_MaxSpeed) {
+    g_motSpeed += motIncrement;
   }
 
   const auto setting = g_vibrator.map_motspeed_to_vibrator();
@@ -1560,11 +1449,11 @@ MachineStates Logic::change_state(MachineStates newState)
     switch(state){
       case MachineStates::manual_motor_control:
         myEnc.write(sensitivity);//Whenever going into auto mode, keep the last sensitivity
-        motSpeed = 0; //Also reset the motor speed to 0
+        g_motSpeed = 0; //Also reset the motor speed to 0
         return MachineStates::manual_edge_control;
       case MachineStates::manual_edge_control:
         myEnc.write(0);//Whenever going into manual mode, set the speed to 0.
-        motSpeed = 0;
+        g_motSpeed = 0;
         EEPROM.update(SENSITIVITY_ADDR, sensitivity);
         return MachineStates::manual_motor_control;
     }
@@ -1572,10 +1461,10 @@ MachineStates Logic::change_state(MachineStates newState)
   else if(btnState == BTN_LONG){
     switch (state) {
       case MachineStates::manual_motor_control:
-        myEnc.write(map(maxSpeed, 0, 255, 0, 4 * (NUM_LEDS))); //start at saved value
+        myEnc.write(map(g_MaxSpeed, 0, 255, 0, 4 * (NUM_LEDS))); //start at saved value
         return MachineStates::manual_edge_control;//OPT_SPEED;
       case MachineStates::manual_edge_control:
-        myEnc.write(map(maxSpeed, 0, 255, 0, 4 * (NUM_LEDS))); //start at saved value
+        myEnc.write(map(g_MaxSpeed, 0, 255, 0, 4 * (NUM_LEDS))); //start at saved value
         return MachineStates::manual_motor_control;//OPT_SPEED;
     }
   }
@@ -1609,8 +1498,15 @@ int I2C::runCoroutine()
     cmd = new CSVLogCommand();
     if (cmd != nullptr)
     {
-      //cmd->LogCSV(g_tick, g_tick);
-      cmd->LogCSV(g_tick, int32_t(motSpeed), int32_t(g_pressure), int32_t(avgPressure), int32_t(g_pressure - avgPressure), int32_t(pLimit));
+      cmd->LogCSV(
+        g_tick, 
+        int32_t(g_motSpeed), 
+        int32_t(g_pressure), 
+        int32_t(avgPressure), 
+        int32_t(g_pressure - avgPressure), 
+        int32_t(pLimit), 
+        int32_t(g_logic.GetCooldown()*1000.0f)
+      );
       g_i2c.SendI2CCommand(cmd);
     }
     delete (cmd);

@@ -63,7 +63,6 @@ private:
   {
     memcpy(_buffer, &_type, sizeof(_type));
     _buffer += sizeof(_type);
-    //Serial.print("wrote "); Serial.print(sizeof(_type)); Serial.println(" bytes");
 
     if constexpr(sizeof...(remainderArgs) > 0)
     {
@@ -114,30 +113,4 @@ private:
       describeType(descriptionArray, remainderArgs...);
     } 
   }
-public:
-/*
-  void  SetString(const char* pValue) 
-  {
-    const uint32_t strLen = strlen(pValue);
-    if (strLen > 0)
-    {
-      AllocateBuffer(strLen);
-      memcpy(ptr, pValue, strLen);
-    }
-    else
-    {
-      AllocateBuffer(1);
-      ptr[0] = 0;
-    }
-  }
-  const char* GetString() const
-  {
-    return ptr;
-  }
-*/
-  virtual void Execute() const 
-  {
-  }
-private:
-  //char* &ptr = reinterpret_cast<char*&>(_buffer);
 };

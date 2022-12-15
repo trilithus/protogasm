@@ -11,5 +11,13 @@
 	@copy /Y "%filepath%" .\data.bin >\nul
 )
 
+@setlocal EnableExtensions
+@set "uniquePath=temp\%RANDOM%"
+@mkdir %uniquePath%
+
+@copy /b data.bin %uniquePath%
+@copy /b *.plt %uniquePath%
+@pushd %uniquePath%
 @start .\plotter_all.plt
 @start .\plotter_p.plt
+@popd

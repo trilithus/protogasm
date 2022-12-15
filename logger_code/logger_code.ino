@@ -11,6 +11,7 @@
 #define DEBUG_MSG(...)
 #define DEBUG_MSGF(...)
 #endif
+#include <time.h>
 
 #include <Wire.h>
 #include "SdFat.h"
@@ -18,6 +19,18 @@
 #include <Wire.h>
 #include <CircularBuffer.h>
 
+#include <NTPClient.h>
+#include <ESP8266WiFi.h>
+#include <WiFiUdp.h>
+
+#if 0
+#define FTP_SERVER_NETWORK_TYPE NETWORK_ESP8266
+#define DEFAULT_FTP_SERVER_NETWORK_TYPE_ESP8266 NETWORK_ESP8266
+#define DEFAULT_STORAGE_TYPE_ESP8266 				STORAGE_SDFAT2
+#define STORAGE_TYPE STORAGE_SDFAT2
+#define STORAGE_SPIFFS_FORCE_DISABLE
+#include <SimpleFTPServer.h>
+#endif
 
 //Command manager:
 #include "commandmanager.h"
@@ -38,6 +51,16 @@ const uint8_t SD_CS_PIN = D8;
 
 static CircularBuffer<uint8_t,1024*2> g_buffer;     // uses 538 bytes
 static CommandAssembler g_assembler;
+
+// Time:
+bool g_hasTime = false;
+WiFiUDP g_ntpUDP;
+NTPClient g_timeClient(g_ntpUDP);
+
+#if 0
+// FTPd
+FtpServer g_ftpd;
+#endif
 
 // Storage
 
@@ -199,19 +222,26 @@ void SDWriter::Write(const char* pString, uint32_t pLength/*=0*/)
 
 void SDWriter::WriteLn(const char* pString, uint32_t pLength/*=0*/)
 {
+  size_t bytesWritten = 0;
   if (HasSession())
   {
     const auto len = (pLength>0 ? pLength : strlen(pString));
-    if(_sessionFile.write(pString, len) == 0)
+    if(len>0) 
+    {
+      bytesWritten += _sessionFile.write(pString, len);
+    }
+
+    bytesWritten += _sessionFile.write("\n", 1);
+
+    if (bytesWritten==0)
     {
       //Handle error:
       Serial.print(F("Write error: ")); 
       Serial.print(_sessionFile.getWriteError());
       Serial.println("");
     }
-    _sessionFile.write("\n", 1);
-    _written += len + 1;
   }
+  _written += bytesWritten;
 }
 ///////////////////////////////////////////////////////////////////
 class CustomSessionBeginEnd : public SessionBeginEndCmd
@@ -234,6 +264,7 @@ void CustomSessionBeginEnd::Execute() const
   Serial.flush();
 }
 
+#if 0
 class CustomPrintCmd : public PrintCmd
 {
 public:
@@ -250,10 +281,128 @@ void CustomPrintCmd::Execute() const
     g_Storage.Flush();
   }
 } 
-///////////////////////////////////////////////////////////////////
+#endif
+
+class CustomCSVLog : public CSVLogCommand
+{
+public:
+  virtual void Execute() const override
+  {
+    if (!g_Storage.HasSession())
+    {
+      return;
+    }
+
+    uint8_t* ptrBuffer = reinterpret_cast<uint8_t*>(_buffer);
+    //for(int i=0; i < _bufferSz; i++)
+    //{
+    //  DEBUG_MSGF("%02X ", ptrBuffer[i]);
+    //}
+
+    uint8_t numberOfTypes = ptrBuffer[0]; 
+    uint8_t alignment = ptrBuffer[1]; 
+    ptrBuffer += 4;
+    //DEBUG_MSGF("numberOfTypes = %d\n", numberOfTypes);
+    //DEBUG_MSGF("alignment = %d\n", alignment); 
+
+    TypeDescription* types = reinterpret_cast<TypeDescription*>(alloca(numberOfTypes * sizeof(TypeDescription)));
+    memcpy(types, ptrBuffer, numberOfTypes * sizeof(TypeDescription));
+    ptrBuffer+=numberOfTypes * sizeof(TypeDescription);
+    ptrBuffer+=alignment;
+
+    uint8_t* typeSizes = reinterpret_cast<uint8_t*>(alloca(numberOfTypes * sizeof(uint8_t)));
+    memcpy(typeSizes, ptrBuffer, numberOfTypes * sizeof(uint8_t));
+    ptrBuffer+=numberOfTypes * sizeof(uint8_t);
+    ptrBuffer+=alignment;
+
+    for(uint i=0; i < numberOfTypes; i++)
+    {
+      char buffer[32]{0};
+      switch(types[i])
+      {
+        case TypeDescription::type_uint32: {
+          //DEBUG_MSGF("[%d] uint32(%d) %02X %02X %02X %02X\n", i, typeSizes[i], ptrBuffer[0], ptrBuffer[1], ptrBuffer[2], ptrBuffer[3]); Serial.flush();
+          sprintf(&buffer[0], "%u", *reinterpret_cast<uint32_t*>(ptrBuffer));
+          ptrBuffer += typeSizes[i];
+        } break;
+        case TypeDescription::type_int32: {
+          //DEBUG_MSGF("[%d] uint32(%d) %02X %02X %02X %02X\n", i, typeSizes[i], ptrBuffer[0], ptrBuffer[1], ptrBuffer[2], ptrBuffer[3]); Serial.flush();
+          sprintf(&buffer[0], "%d", *reinterpret_cast<int32_t*>(ptrBuffer));
+          ptrBuffer += typeSizes[i];
+        } break;
+        case TypeDescription::type_int: {
+          //DEBUG_MSGF("[%d] int(%d) %02X %02X %02X %02X\n", i, typeSizes[i], ptrBuffer[0], ptrBuffer[1], ptrBuffer[2], ptrBuffer[3]); Serial.flush();
+          sprintf(&buffer[0], "%d", *reinterpret_cast<short*>(ptrBuffer));
+          ptrBuffer += typeSizes[i];
+        } break;
+        case TypeDescription::type_float: {
+          //DEBUG_MSGF("[%d] float(%d) %02X %02X %02X %02X\n", i, typeSizes[i], ptrBuffer[0], ptrBuffer[1], ptrBuffer[2], ptrBuffer[3]); Serial.flush();
+          sprintf(&buffer[0], "%f", *reinterpret_cast<float*>(ptrBuffer));
+          ptrBuffer += typeSizes[i];
+        } break;
+      }
+
+      //Serial.write(buffer);
+      g_Storage.Write(buffer);
+      DEBUG_MSG(buffer);
+
+      if (i+1 == numberOfTypes) {
+        g_Storage.WriteLn("");
+        DEBUG_MSG("\n");
+      } else {
+        g_Storage.Write(",");
+        DEBUG_MSG(",");
+      }
+    }
+    g_Storage.Flush();
+  }
+};
+//////////////////////////////////////////////////////////////////
 void setup()
  {
   Serial.begin(230400); /* begin serial for debug */
+  pinMode(LED_BUILTIN, OUTPUT);
+  digitalWrite(LED_BUILTIN, LOW);
+
+  // Initialize WIFI:
+  WiFi.begin("EchelonIVDE", "DikkeBoss2005");
+  Serial.print("Connecting");
+  auto now = millis();
+  bool timeout = false;
+  while (WiFi.status() != WL_CONNECTED)
+  {
+    delay(500);
+    Serial.print(".");
+    if (millis() > now+(1000*30))
+    {
+      timeout = true;
+      break;
+    }
+  }
+  Serial.println();
+  if (!timeout)
+  {
+    Serial.print("Connected, IP address: ");
+    Serial.println(WiFi.localIP());
+    Serial.print("hwaddress: ");
+    Serial.println(WiFi.macAddress().c_str());
+  } else {
+    Serial.println("Wifi Timeout");
+  }
+  if (!timeout) 
+  {
+    g_hasTime = true;
+    g_timeClient.begin();
+    SdFile::dateTimeCallback([](uint16_t* date, uint16_t* time){
+      time_t now = g_timeClient.getEpochTime();
+      auto tm = localtime(&now);
+      *date = FS_DATE(tm->tm_year+1900, tm->tm_mon, tm->tm_mday);
+      *time = FS_TIME(tm->tm_hour, tm->tm_min, tm->tm_sec);
+    });
+  }
+
+  //g_ftpd.begin();
+
   DEBUG_MSG("Hello low level print\n");
   Wire.begin(WIRE_PIN_SDA, WIRE_PIN_SCL, 0x43); /* join i2c bus with SDA=D1 and SCL=D2 of NodeMCU */
   Wire.onReceive(i2cReceiveEvent); /* register receive event */
@@ -271,11 +420,19 @@ void setup()
     });
   }
   {
+    static constexpr uint8_t cid = static_cast<uint8_t>(CommandID::CSVLog);
+    CommandAssembler::RegisterCommand<cid>([]()->Command*{
+      return new CustomCSVLog();
+    });
+  }
+  #if 0
+  {
     static constexpr uint8_t cid = static_cast<uint8_t>(CommandID::Print);
     CommandAssembler::RegisterCommand<cid>([]()->Command*{
       return new CustomPrintCmd();
     });
   }
+  #endif
 
   // Initialize SD.
   g_Storage.Setup();
@@ -284,6 +441,8 @@ void setup()
   #if defined(I2C_PROTOCOL) && I2C_PROTOCOL==1
   g_assembler.ListenForCommand();
   #endif
+
+  digitalWrite(LED_BUILTIN, HIGH);
 }
 
 uint32_t i = 0;
@@ -318,6 +477,12 @@ void i2cRequestEvent()
 
 void loop()
 {
+  if (g_hasTime)
+  {
+    g_timeClient.update();
+  }
+   //g_ftpd.handleFTP();
+
 #if defined(I2C_PROTOCOL) && I2C_PROTOCOL==0
   static uint8_t lastRequests = 0;
   if (_requestsPending != lastRequests)
@@ -345,6 +510,7 @@ void loop()
         _requestsPending = 0; //not multihost
         noInterrupts();
         g_assembler.GetCommand()->Execute();
+        delay(1);
         interrupts();
         g_assembler.DeleteCommand();
         //pinMode(WIRE_PIN_SDA, OUTPUT);
