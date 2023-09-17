@@ -1,5 +1,6 @@
 #pragma GCC push_options
 #pragma GCC optimize ("Os")
+
 //#define CMD_DEBUG 1
 
 // Protogasm Code, forked from Nogasm Code Rev. 3
@@ -44,7 +45,7 @@
 #include <Encoder.h>
 #include <EEPROM.h>
 #include "FastLED.h"
-#include "RunningAverageT.h"
+#include <MovingAveragePlus.h> //using custom version from https://github.com/trilithus/MovingAveragePlus
 #include <Arduino.h>
 #include <AceRoutine.h>
 #include "commandmanager.h"
@@ -57,8 +58,8 @@ using namespace ace_routine;
 #define RA_FREQUENCY 10
 #define RA_TICK_PERIOD (FREQUENCY / RA_FREQUENCY)
 
-RunningAverageT<unsigned short, RA_FREQUENCY*RA_HIST_SECONDS> raPressure;
-RunningAverageT<unsigned short, 8> curPressure;
+MovingAveragePlus<uint16_t, uint32_t, RA_FREQUENCY*RA_HIST_SECONDS> g_raOverallPressure;
+MovingAveragePlus<uint16_t, uint32_t, 8> g_raImmediatePressure;
 
 //LCD
 #define U8X8_HAVE_HW_I2C
@@ -150,8 +151,8 @@ enum class PhysBtnState
 
 CRGB leds[NUM_LEDS];
 
-int g_pressure = 0;
-int avgPressure = 0; //Running 25 second average pressure
+int g_currentPressure = 0;
+int g_avgPressure = 0; //Running 25 second average pressure
 //int bri =100; //Brightness setting
 int rampTimeS = 150; //120; //Ramp-up time, in seconds
 float s_cooldownTime = 0.40f;//0.5f;
@@ -161,7 +162,7 @@ int pLimitLast = DEFAULT_PLIMIT;
 int g_MaxSpeed = 255; //maximum speed the motor will ramp up to in automatic mode
 float g_motSpeed = 0; //Motor speed, 0-255 (float to maintain smooth ramping to low speeds)
 uint16_t edgeCount = 0;
-auto lastEdgeCountChange = millis();
+auto g_lastEdgeCountChange = 0;
 static uint32_t g_tick = 0;
 
 //Menu Items:
@@ -286,8 +287,9 @@ class Logic : Coroutine
     void run_menu();
     void run_read_variable();
     void run_automatic_edge_control();
-    void run_manual_edge_control();
+    void run_edge_control();
     void run_manual_motor_control();
+    void update_current_status();
     PhysBtnState check_button();
     void run_state_machine(MachineStates state);
     MachineStates Logic::change_state(MachineStates newState);
@@ -361,6 +363,7 @@ class Vibrator : Coroutine
     void vibrator_reset();
     void vibrator_to(const int mode);
     void set_vibrator_mode(int fromStrength, int toStrength);
+    bool isVibratorOn() { return _currentState.powered; }
     int map_motspeed_to_vibrator();
 
     virtual int runCoroutine() override;
@@ -401,6 +404,12 @@ class LCD : public Coroutine
   public:
     void Setup();
     void Update();
+    void nextMode() { 
+      _mode++; 
+      _lastChange=millis(); 
+      g_lastEdgeCountChange=_lastTargetChange=0;
+    }
+
     virtual int runCoroutine() override;
 
     template <typename T, typename I, int idx = 0, typename... Iremainder>
@@ -412,9 +421,9 @@ class LCD : public Coroutine
     static void lcdfunc_renderTarget();
     static void lcdfunc_renderPressure();
 
-    static void RenderPanic(const char* _str);
+    static void RenderPanic(const String _str);
   public:
-    static unsigned long lastTargetChange;
+    static unsigned long _lastTargetChange;
   private:
     union lcdrenderdata_t
     {
@@ -433,9 +442,11 @@ class LCD : public Coroutine
         return arg;
       }
     } static lcdrenderdata[2];
+    int8_t _mode = 0;
+    unsigned long _lastChange = millis();
 } g_lcd;
 LCD::lcdrenderdata_t LCD::lcdrenderdata[2]{};
-unsigned long LCD::lastTargetChange = millis();
+unsigned long LCD::_lastTargetChange = 0;
 LCD::lcdrender_t LCD::lcdrender_activefunc = nullptr;
 U8G2_SSD1306_128X32_UNIVISION_1_HW_I2C LCD::u8g2(U8G2_R0, /* reset=*/ U8X8_PIN_NONE);
 
@@ -474,11 +485,11 @@ void LCD::Update()
   }
 }
 
-void LCD::RenderPanic(const char* _str)
+void LCD::RenderPanic(const String _str)
 {
   Serial.println(_str);
   Serial.flush();
-  LCD::setLCDFunc(LCD::lcdfunc_renderText, _str);
+  LCD::setLCDFunc(LCD::lcdfunc_renderText, _str.c_str());
   do
   {
     lcdrender_activefunc();
@@ -501,35 +512,33 @@ void LCD::run_lcd_status(MachineStates state)
   }
   else
   {
-    static int8_t mode = 0;
-    static auto lastChange = millis();
     const auto now = millis();
 
-    if ( (now - lastChange) > 5000 )
+    if ( (now - _lastChange) > 5000 )
     {
-      mode++;
-      lastChange = now;
+      _mode++;
+      _lastChange = now;
     }
 
-    if ( (now-lastTargetChange) < 15000 )
+    if ( (now-_lastTargetChange) < 15000 )
     {
-      mode = 1;
+      _mode = 1;
     }
 
-    if ( (now - lastEdgeCountChange) < 5000 )
+    if ( (now - g_lastEdgeCountChange) < 5000 )
     {
-      mode = 2;
+      _mode = 2;
     }
     
-    switch (mode % 3)
+    switch (_mode % 3)
     {
       case 0:
         {
-          setLCDFunc(lcdfunc_renderPressure, g_pressure);
+          setLCDFunc(lcdfunc_renderPressure, g_currentPressure, g_avgPressure);
         } break;
       case 1:
         {
-          setLCDFunc(lcdfunc_renderTarget, max(0, g_pressure - avgPressure), max(0, pLimit));
+          setLCDFunc(lcdfunc_renderTarget, max(0, g_currentPressure - g_avgPressure), max(0, pLimit));
         } break;
       case 2:
       {
@@ -587,7 +596,7 @@ void LCD::lcdfunc_renderMenu()
   {
     case MenuItemsEnum::automatic_input_time:
     text += g_logic.getAutomaticInputTimeMinutes();
-    text += "m";
+    text += F("m");
     break;
     case MenuItemsEnum::automatic_input_min:
     text += g_logic.getAutomaticInputMin();
@@ -626,6 +635,12 @@ void LCD::lcdfunc_renderPressure()
   u8g2.setFont(font_24pt);
   u8g2.setCursor(10, u8g2.getMaxCharHeight());
   u8g2.print(lcdrenderdata[0].integer32);
+  u8g2.setCursor(50, u8g2.getMaxCharHeight());
+  u8g2.setFont(font_13pt);
+  u8g2.print(F("vs"));
+  u8g2.setFont(font_24pt);
+  u8g2.setCursor(60, u8g2.getMaxCharHeight());
+  u8g2.print(lcdrenderdata[1].integer32);
 }
 
 void LCD::lcdfunc_renderTarget()
@@ -689,12 +704,12 @@ namespace bitmaps
       0xf8, 0x3f, 0xf8, 0x3f, 0xf8, 0x3f, 0xf0, 0x1f, 0xc0, 0x07, 0x80, 0x03,
       0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
 
-  static const unsigned char heart_bits_crossed[] PROGMEM = {
+  static const uint8_t heart_bits_crossed[] PROGMEM = {
       0x01, 0x00, 0x02, 0x80, 0x04, 0x40, 0x68, 0x2c, 0x98, 0x32, 0x28, 0x29,
       0x48, 0x24, 0x88, 0x22, 0x18, 0x21, 0xb0, 0x12, 0x40, 0x04, 0xa0, 0x0a,
       0x10, 0x11, 0x08, 0x20, 0x04, 0x40, 0x02, 0x80};
 
-  static const unsigned char connected_bits[] PROGMEM = {
+  static const uint8_t connected_bits[] PROGMEM = {
       0x00, 0x00, 0xf0, 0x07, 0xf0, 0x07, 0xf0, 0x03, 0x30, 0x00, 0xb0, 0x07,
       0xbf, 0xff, 0xff, 0xff, 0xbf, 0xff, 0xb0, 0x07, 0x30, 0x00, 0xf0, 0x03,
       0xf0, 0x03, 0xf0, 0x03, 0x00, 0x00, 0x00, 0x00};
@@ -903,14 +918,8 @@ void Sensor::Setup()
     {
       analogReference(INTERNAL);//(EXTERNAL);
       pinMode(BUTTPIN, INPUT); //default is 10 bit resolution (1024), 0-3.3
-      raPressure.clear();      //Initialize a running pressure average
-      curPressure.clear();
-
-      //Check memory, if size is 0, we failed to allocate...
-      if (raPressure.getSize() == 0)
-      {
-        LCD::RenderPanic(reinterpret_cast<const char*>(F("OUT OF MEM")));
-      }
+      g_raOverallPressure.clear(); 
+      g_raImmediatePressure.clear();
     }
 
     int Sensor::runCoroutine() 
@@ -947,14 +956,20 @@ void Sensor::Setup()
         }
 
         auto pressure = analogRead(BUTTPIN)*8;
-        curPressure.addValue(pressure);
-        g_pressure = curPressure.getAverage();
+        g_raImmediatePressure.push(uint16_t(pressure));
+        g_currentPressure = g_raImmediatePressure.get();
 
         if (s_lastTick != g_tick)
         {
           s_lastTick = g_tick;
-          raPressure.addValue(curPressure.getAverage());
-          avgPressure = raPressure.getAverage();
+
+          //Only update our overall presure if it's not being influenced by the vibe.
+          //Or, if it lowers the average pressure...
+          if (!g_vibrator.isVibratorOn() || g_currentPressure < g_raOverallPressure.get())
+          {
+            g_raOverallPressure.push(uint16_t(g_currentPressure));
+          }
+          g_avgPressure = g_raOverallPressure.get();
           COROUTINE_YIELD();
         } else {
           COROUTINE_DELAY(1);
@@ -1198,7 +1213,7 @@ void Logic::run_manual_motor_control()
   }
 
   //gyrGraphDraw(avgPressure, 0, 4 * 3 * NUM_LEDS);
-  const int presDraw = map(constrain(g_pressure - avgPressure, 0, pLimit),0,pLimit,0,NUM_LEDS*3);
+  const int presDraw = map(constrain(g_currentPressure - g_avgPressure, 0, pLimit),0,pLimit,0,NUM_LEDS*3);
   draw_bars_3(presDraw, CRGB::Green,CRGB::Yellow,CRGB::Red);
   draw_cursor(knob, CRGB::Red);
 }
@@ -1214,8 +1229,9 @@ void Logic::run_automatic_edge_control()
 }
 
 // Automatic edging mode, knob adjust sensitivity.
-void Logic::run_manual_edge_control() 
+void Logic::run_edge_control() 
 {
+  unsigned long now = millis();
   static float motIncrement = 0.0;
   motIncrement = ((float)g_MaxSpeed / ((float)FREQUENCY * (float)rampTimeS));
 
@@ -1228,15 +1244,22 @@ void Logic::run_manual_edge_control()
   if (pLimit != pLimitLast)
   {
     pLimitLast = pLimit;
-    LCD::lastTargetChange = millis();
+    LCD::_lastTargetChange =now;
   }
+
+  const float edgeTime = static_cast<float>(now-_lastEdgeTime) / 1000.0f;
+  int limitOffset=0;
+  if (edgeTime < DEFAULT_EDGETIME_TARGET_MIN_S*0.5f)
+  {
+    limitOffset = _automatic_edge_maxtarget - pLimit;
+  }
+
   //When someone clenches harder than the pressure limit
-  if (g_pressure - avgPressure > pLimit) {
+  if (g_currentPressure - g_avgPressure > (pLimit+limitOffset)) {
     if (g_motSpeed > 0.0f)
     {
       #if (defined(EDGEALGORITHM) && EDGEALGORITHM==1)
       //Adjust cooldown
-      const float edgeTime = static_cast<float>(millis()-_lastEdgeTime) / 1000.0f;
       const float diff = edgeTime - DEFAULT_EDGETIME_TARGET_s;
 
       DEBUG_ONLY(Serial.print(F("Adjusted cooldown: ")));
@@ -1261,7 +1284,7 @@ void Logic::run_manual_edge_control()
       g_vibrator.vibrator_off();
       g_vibrator.vibrator_reset();
       edgeCount++;
-      lastEdgeCountChange = millis();
+      g_lastEdgeCountChange = millis();
     }
 
     #if !defined(EDGEALGORITHM) || EDGEALGORITHM==0
@@ -1287,7 +1310,7 @@ void Logic::run_manual_edge_control()
     g_vibrator.vibrator_reset();
   }
   
-  int presDraw = map(constrain(g_pressure - avgPressure, 0, pLimit), 0, pLimit, 0, NUM_LEDS * 3);
+  int presDraw = map(constrain(g_currentPressure - g_avgPressure, 0, pLimit), 0, pLimit, 0, NUM_LEDS * 3);
   draw_bars_3(presDraw, CRGB::Green, CRGB::Yellow, CRGB::Red);
   draw_cursor_3(knob, CRGB(50, 50, 200), CRGB::Blue, CRGB::Purple);
 }
@@ -1331,20 +1354,31 @@ PhysBtnState Logic::check_button()
   return btnState;
 }
 
+void Logic::update_current_status()
+{
+  if (_physBtnState == PhysBtnState::Short)
+  {
+    g_lcd.nextMode();
+  }
+}
+
 //run the important/unique parts of each state. Also, set button LED color.
 void Logic::run_state_machine(MachineStates state)
 {
   switch (state) {
     case MachineStates::manual_motor_control:
+      update_current_status();
       run_manual_motor_control();
       break;
     case MachineStates::manual_edge_control:
-      run_manual_edge_control();
+      update_current_status();
+      run_edge_control();
       break;
     case MachineStates::auto_edge_control:
     {
+      update_current_status();
       run_automatic_edge_control();
-      run_manual_edge_control();
+      run_edge_control();
       break;
     }
     case MachineStates::menu: 
@@ -1384,7 +1418,7 @@ MachineStates Logic::change_state(MachineStates newState)
         EEPROM.update(SENSITIVITY_ADDR, sensitivity);
         _autoEdgeTargetOffset = 0;
       } break;
-      default: g_lcd.RenderPanic("State not implemented!"); break;
+      default: g_lcd.RenderPanic(F("State not implemented!")); break;
     }
 
     switch(newState)
@@ -1426,7 +1460,7 @@ MachineStates Logic::change_state(MachineStates newState)
         g_vibrator.vibrator_reset();
         g_vibrator.vibrator_on();
       } break;
-      default: g_lcd.RenderPanic("State not implemented!"); break;
+      default: g_lcd.RenderPanic(F("State not implemented!")); break;
     }
 
     _state = newState;
@@ -1501,9 +1535,9 @@ int I2C::runCoroutine()
       cmd->LogCSV(
         g_tick, 
         int32_t(g_motSpeed), 
-        int32_t(g_pressure), 
-        int32_t(avgPressure), 
-        int32_t(g_pressure - avgPressure), 
+        int32_t(g_currentPressure), 
+        int32_t(g_avgPressure), 
+        int32_t(g_currentPressure - g_avgPressure), 
         int32_t(pLimit), 
         int32_t(g_logic.GetCooldown()*1000.0f)
       );
