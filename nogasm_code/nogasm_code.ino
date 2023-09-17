@@ -1231,6 +1231,7 @@ void Logic::run_automatic_edge_control()
 // Automatic edging mode, knob adjust sensitivity.
 void Logic::run_edge_control() 
 {
+  unsigned long now = millis();
   static float motIncrement = 0.0;
   motIncrement = ((float)g_MaxSpeed / ((float)FREQUENCY * (float)rampTimeS));
 
@@ -1243,15 +1244,22 @@ void Logic::run_edge_control()
   if (pLimit != pLimitLast)
   {
     pLimitLast = pLimit;
-    LCD::_lastTargetChange = millis();
+    LCD::_lastTargetChange =now;
   }
+
+  const float edgeTime = static_cast<float>(now-_lastEdgeTime) / 1000.0f;
+  int limitOffset=0;
+  if (edgeTime < DEFAULT_EDGETIME_TARGET_MIN_S*0.5f)
+  {
+    limitOffset = _automatic_edge_maxtarget - pLimit;
+  }
+
   //When someone clenches harder than the pressure limit
-  if (g_currentPressure - g_avgPressure > pLimit) {
+  if (g_currentPressure - g_avgPressure > (pLimit+limitOffset)) {
     if (g_motSpeed > 0.0f)
     {
       #if (defined(EDGEALGORITHM) && EDGEALGORITHM==1)
       //Adjust cooldown
-      const float edgeTime = static_cast<float>(millis()-_lastEdgeTime) / 1000.0f;
       const float diff = edgeTime - DEFAULT_EDGETIME_TARGET_s;
 
       DEBUG_ONLY(Serial.print(F("Adjusted cooldown: ")));
