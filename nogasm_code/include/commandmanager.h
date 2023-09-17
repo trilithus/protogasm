@@ -19,6 +19,7 @@ public:
   ~Command() { ReleaseBuffer(); }
 protected:
   uint32_t _bufferSz{};
+  unsigned long _delay=0;
   void* _buffer = nullptr;
   void* _rawbuffer = nullptr;
 
@@ -43,6 +44,8 @@ protected:
     _buffer = nullptr;
   }
 public:
+  void SetDelay(unsigned long delay) { _delay = delay; }
+  unsigned long GetDelay() const { return _delay; }
   void* GetBuffer() { return _buffer; }
   uint32_t GetBufferSize() const { return _bufferSz; }
 

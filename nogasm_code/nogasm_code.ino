@@ -101,9 +101,6 @@ constexpr uint8_t PIN_VIBRATOR_DOWN = 8;
 constexpr uint8_t PIN_VIBRATOR_UP = 13;
 constexpr uint8_t VIBRATOR_PUSH_DELAY = 150;
 
-//Storage
-#define I2C_PROTOCOL 0
-
 //Pressure Sensor Analog In
 #define BUTTPIN A0
 // Sampling 4x and not dividing keeps the samples from the Arduino Uno's 10 bit
@@ -151,15 +148,15 @@ enum class PhysBtnState
 
 CRGB leds[NUM_LEDS];
 
-int g_currentPressure = 0;
-int g_avgPressure = 0; //Running 25 second average pressure
+int16_t g_currentPressure = 0;
+int16_t g_avgPressure = 0; //Running 25 second average pressure
 //int bri =100; //Brightness setting
-int rampTimeS = 150; //120; //Ramp-up time, in seconds
+int16_t rampTimeS = 150; //120; //Ramp-up time, in seconds
 float s_cooldownTime = 0.40f;//0.5f;
 #define DEFAULT_PLIMIT 900
-int pLimit = DEFAULT_PLIMIT; //Limit in change of pressure before the vibrator turns off
-int pLimitLast = DEFAULT_PLIMIT;
-int g_MaxSpeed = 255; //maximum speed the motor will ramp up to in automatic mode
+int16_t pLimit = DEFAULT_PLIMIT; //Limit in change of pressure before the vibrator turns off
+int16_t pLimitLast = DEFAULT_PLIMIT;
+int16_t g_MaxSpeed = 255; //maximum speed the motor will ramp up to in automatic mode
 float g_motSpeed = 0; //Motor speed, 0-255 (float to maintain smooth ramping to low speeds)
 uint16_t edgeCount = 0;
 auto g_lastEdgeCountChange = 0;
@@ -203,7 +200,7 @@ MenuItemsEnum g_automaticMenu[] {
   MenuItemsEnum::LAST,
 };
 
-const __FlashStringHelper& getMenuItemLabels(MenuItemsEnum pValue, String& output)
+void getMenuItemLabels(MenuItemsEnum pValue, String& output)
 {
   switch(pValue)
   {
@@ -234,24 +231,7 @@ T clamp(const T val, const T minVal, const T maxVal) { return (val<minVal) ? min
 #else
 #define DEBUG_ONLY(...) void(0)
 #endif
-void logI2C(String& output)
-{
-  /*
-  output = "";
-  output += g_tick;//(millis() / 1000.0); //Timestamp (s)
-  output += (",");
-  output += (g_motSpeed); //Motor speed (0-255)
-  output += (",");
-  output += (g_pressure); //(Original ADC value - 12 bits, 0-4095)
-  output += (",");
-  output += (avgPressure); //Running average of (default last 25 seconds) pressure
-  output += (",");
-  output += (g_pressure - avgPressure);
-  output += (",");
-  output += (pLimit);
-  output += (F(",\r\n"));
-  */
-}
+
 
 //=======EEPROM Addresses============================
 //128b available on teensy LC
@@ -265,22 +245,6 @@ void logI2C(String& output)
 //#define RAMPSPEED_ADDR    4 //For now, ramp speed adjustments aren't implemented
 
 //=======Hardware Coroutines=========================
-class I2C : public Coroutine
-{
-  public:
-    void Setup();
-    void Update();
-
-    virtual int runCoroutine() override;
-    void SendI2CCommand(Command* cmd);
-
-    uint32_t GetLastPingValue() const {return _lastPingValue; }
-    unsigned long GetLastPing() const { return _lastPing; }
-  private:
-    uint32_t _lastPingValue = 0;
-    unsigned long _lastPing = 0;
-} g_i2c;
-
 class Logic : Coroutine
 {
   protected:
@@ -290,9 +254,10 @@ class Logic : Coroutine
     void run_edge_control();
     void run_manual_motor_control();
     void update_current_status();
+    void check_session();
     PhysBtnState check_button();
     void run_state_machine(MachineStates state);
-    MachineStates Logic::change_state(MachineStates newState);
+    MachineStates change_state(MachineStates newState);
     void resetSession();
   public:
     void Setup();
@@ -333,6 +298,7 @@ class Logic : Coroutine
     #if (defined(EDGEALGORITHM) && EDGEALGORITHM==1)
     float _cooldown = 0.0f;
     unsigned long _lastEdgeTime=0;
+    unsigned long _lastMotorEnableTimeMs=0;
     public:
       float GetCooldown() const { return _cooldown; }
     #endif
@@ -529,7 +495,7 @@ void LCD::run_lcd_status(MachineStates state)
     {
       _mode = 2;
     }
-    
+
     switch (_mode % 3)
     {
       case 0:
@@ -730,7 +696,7 @@ namespace bitmaps
   #define heart_height 16
   #if 1
 
-  static constexpr uint8_t buffersz = max(max(sizeof(bitmaps::connected_bits), sizeof(bitmaps::heart_bits)),
+  static constexpr uint8_t buffersz = std::max(std::max(sizeof(bitmaps::connected_bits), sizeof(bitmaps::heart_bits)),
                                                                        sizeof(bitmaps::heart_bits_crossed));
 
   uint8_t realBuffer[buffersz];
@@ -742,15 +708,6 @@ namespace bitmaps
     buffer[i] = pgm_read_byte_near((g_motSpeed >= 0.01f ? bitmaps::heart_bits : bitmaps::heart_bits_crossed) +i);
   }
   u8g2.drawXBM(u8g2.getDisplayWidth() - heart_width, 0, heart_width, heart_height, buffer);
-
-  if (millis() < g_i2c.GetLastPing()+1000 && g_i2c.GetLastPingValue()>0)
-  {
-    for(uint8_t i=0; i < sizeof(bitmaps::connected_bits); i++)
-    {
-      buffer[i] = pgm_read_byte_near(bitmaps::connected_bits + i);
-    }
-    u8g2.drawXBM(u8g2.getDisplayWidth() - heart_width, heart_height, heart_width, heart_height, buffer);
-  }
 
   //free(buffer);
   #else
@@ -916,7 +873,7 @@ void LEDs::Update()
 // Sensor
 void Sensor::Setup()
     {
-      analogReference(INTERNAL);//(EXTERNAL);
+      analogReference(AR_INTERNAL);//(EXTERNAL);
       pinMode(BUTTPIN, INPUT); //default is 10 bit resolution (1024), 0-3.3
       g_raOverallPressure.clear(); 
       g_raImmediatePressure.clear();
@@ -1053,6 +1010,9 @@ int Logic::runCoroutine()
 
         run_state_machine(_state);
         FastLED.show(); //Update the physical LEDs to match the buffer in software
+
+        check_session();
+
         COROUTINE_YIELD();
       }
     }
@@ -1098,13 +1058,13 @@ void Logic::resetSession()
   if (_hasSession) {
     SessionBeginEndCmd cmd;
     cmd.SetValue(0);
-    g_i2c.SendI2CCommand(&cmd);
+    //g_i2c.SendI2CCommand(&cmd);
     delay(100);
   }
 
   SessionBeginEndCmd cmd;
   cmd.SetValue(1);
-  g_i2c.SendI2CCommand(&cmd);
+  //g_i2c.SendI2CCommand(&cmd);
   _hasSession = true;
 }
 
@@ -1233,6 +1193,7 @@ void Logic::run_edge_control()
 {
   unsigned long now = millis();
   static float motIncrement = 0.0;
+  const float oldMotSpeed = g_motSpeed;
   motIncrement = ((float)g_MaxSpeed / ((float)FREQUENCY * (float)rampTimeS));
 
   const int knob = encLimitRead(0,(3*NUM_LEDS)-1);
@@ -1244,14 +1205,17 @@ void Logic::run_edge_control()
   if (pLimit != pLimitLast)
   {
     pLimitLast = pLimit;
-    LCD::_lastTargetChange =now;
+    LCD::_lastTargetChange = now;
   }
 
-  const float edgeTime = static_cast<float>(now-_lastEdgeTime) / 1000.0f;
-  int limitOffset=0;
-  if (edgeTime < DEFAULT_EDGETIME_TARGET_MIN_S*0.5f)
+  //Temporarily raise the limit:
+  //* if we haven't edged in the past DEFAULT_MIN_COOLDOWN_s/2 seconds
+  //* are within the DEFAULT_EDGETIME_TARGET_MIN_S after the motor starts again.
+  int16_t limitOffset=0;
+  if ( !(now < _lastEdgeTime + static_cast<uint16_t>(DEFAULT_MIN_COOLDOWN_s*0.5f*1000.0f)) && 
+        (now < _lastMotorEnableTimeMs + static_cast<uint16_t>(DEFAULT_EDGETIME_TARGET_MIN_S*1.1f*1000.0f)) )
   {
-    limitOffset = _automatic_edge_maxtarget - pLimit;
+    limitOffset = (_automatic_edge_maxtarget - pLimit)*0.5f;
   }
 
   //When someone clenches harder than the pressure limit
@@ -1260,6 +1224,7 @@ void Logic::run_edge_control()
     {
       #if (defined(EDGEALGORITHM) && EDGEALGORITHM==1)
       //Adjust cooldown
+      const float edgeTime = static_cast<float>(now-_lastEdgeTime) / 1000.0f;
       const float diff = edgeTime - DEFAULT_EDGETIME_TARGET_s;
 
       DEBUG_ONLY(Serial.print(F("Adjusted cooldown: ")));
@@ -1296,6 +1261,11 @@ void Logic::run_edge_control()
   }
   else if (g_motSpeed < (float)g_MaxSpeed) {
     g_motSpeed += motIncrement;
+  }
+
+  if(oldMotSpeed <= 0.0f && g_motSpeed > 0.0f)
+  {
+    _lastMotorEnableTimeMs = now;
   }
 
   const auto setting = g_vibrator.map_motspeed_to_vibrator();
@@ -1359,6 +1329,17 @@ void Logic::update_current_status()
   if (_physBtnState == PhysBtnState::Short)
   {
     g_lcd.nextMode();
+  }
+}
+
+void Logic::check_session()
+{
+  unsigned long now = millis();
+
+  if(_hasSession)
+  {
+    //check if we need to notify anyone that we have a session
+    //...command was sent here
   }
 }
 
@@ -1506,121 +1487,6 @@ MachineStates Logic::change_state(MachineStates newState)
   #endif
 }
 
-// I2C
-
-void I2C::Setup()
-{
-  pinMode(11, OUTPUT);
-  digitalWrite(11, LOW);
-  Wire.begin();
-  Wire.setClock(3400000);
-  //pinMode(11, LOW);
-  //Wire.setTimeout(1000);
-  //Wire.setWireTimeout(1000, false);
-}
-
-void I2C::Update()
-{
-}
-
-int I2C::runCoroutine()
-{
-  #if 1
-  COROUTINE_LOOP()
-  {
-    static CSVLogCommand *cmd = nullptr;
-    cmd = new CSVLogCommand();
-    if (cmd != nullptr)
-    {
-      cmd->LogCSV(
-        g_tick, 
-        int32_t(g_motSpeed), 
-        int32_t(g_currentPressure), 
-        int32_t(g_avgPressure), 
-        int32_t(g_currentPressure - g_avgPressure), 
-        int32_t(pLimit), 
-        int32_t(g_logic.GetCooldown()*1000.0f)
-      );
-      g_i2c.SendI2CCommand(cmd);
-    }
-    delete (cmd);
-    cmd=nullptr;
-    #if 0
-    static String i2cstring;
-    logI2C(i2cstring);
-    #if defined(DEBUG_LOG_ENABLED) && DEBUG_LOG_ENABLED==1
-    Serial.print(i2cstring);
-    #endif
-
-    static PrintCmd *cmd = nullptr;
-    cmd = new PrintCmd();
-    if (cmd != nullptr)
-    {
-      cmd->SetString(i2cstring.c_str());
-      i2cstring = "";
-      g_i2c.SendI2CCommand(cmd);
-
-      delete (cmd);
-      cmd = nullptr;
-    }
-    else
-    {
-      Serial.println(F("Out of Memory!"));
-    }
-    #endif
-
-
-    COROUTINE_DELAY(250);
-    COROUTINE_YIELD();
-  }
-  #endif
-}
-
-void I2C::SendI2CCommand(Command* cmd)
-{
-  digitalWrite(11, HIGH);
-  #if defined(I2C_PROTOCOL) && I2C_PROTOCOL==0
-  //Request a data to allow the logger to be ready, and then make sure
-  //we wait.
-  //Wire.setClock(35);
-  Wire.setClock(3400000);
-  auto wired = Wire.requestFrom(0x43, 1);
-  if (wired == 0)
-  {
-    return;
-  }
-  while(Wire.available())
-  {
-    _lastPingValue = Wire.read();
-    _lastPing = millis();
-  }
-  #endif
-
-  //Start submitting the command:
-  //Wire.setClock(16000000);
-  Wire.beginTransmission(0x43); /* begin with device address 8 */
-  int32_t sz = cmd->GetBufferSize();
-  #if defined(I2C_PROTOCOL) && I2C_PROTOCOL==1
-  Wire.write(0xDEul);
-  Wire.write(0xADul);
-  Wire.write(0xBEul);
-  Wire.write(0xEFul);
-  #endif
-  Wire.write(static_cast<unsigned int>(cmd->cmdId));
-  Wire.write(reinterpret_cast<const uint8_t*>(&sz), sizeof(sz));
-  Wire.endTransmission(); 
-  const uint8_t* buffer = reinterpret_cast<const uint8_t*>(cmd->GetBuffer());
-  do
-  {
-    Wire.beginTransmission(0x43); 
-    const uint8_t written = Wire.write(buffer, clamp<int32_t>(sz, 0, 10));
-    sz -= written;
-    buffer += written;
-    Wire.endTransmission();    /* stop transmitting */
-  } while(sz>0);
-  digitalWrite(11, LOW);
-}
-
 //=======LED Drawing Functions=================
 
 //Draw a "cursor", one pixel representing either a pressure or encoder position value
@@ -1710,14 +1576,12 @@ void profile(int storageID, ProfiledFunc profiledFunc)
 //=======Setup=======================================
 void setup() 
 {
-  Wire.setWireTimeout(50000, true);
   Serial.begin(230400); delay(100); DEBUG_ONLY(Serial.println(F("Serial up"))); Serial.flush();
   g_sensor.Setup();  delay(100); DEBUG_ONLY(Serial.println(F("Sensor up"))); Serial.flush();
   g_logic.Setup();  delay(100); DEBUG_ONLY(Serial.println(F("Logic up"))); Serial.flush();
   g_lcd.Setup();  delay(100); DEBUG_ONLY(Serial.println(F("LCD up"))); Serial.flush();
   g_leds.Setup();  delay(100); DEBUG_ONLY(Serial.println(F("LEDS up"))); Serial.flush();
   g_vibrator.Setup();  delay(100); DEBUG_ONLY(Serial.println(F("Vibrator up"))); Serial.flush();
-  g_i2c.Setup();  delay(100); DEBUG_ONLY(Serial.println(F("i2C up"))); Serial.flush();
   Serial.println(F("Started up"));
 }
 
@@ -1731,13 +1595,11 @@ void loop()
   profile(2, [](){ g_lcd.runCoroutine(); });
   profile(3, [](){ g_leds.runCoroutine(); });
   profile(4, [](){ g_vibrator.runCoroutine(); });
-  profile(5, [](){ g_i2c.runCoroutine(); });
 #else
   g_sensor.runCoroutine(); 
   g_logic.runCoroutine();
   g_lcd.runCoroutine();
   g_leds.runCoroutine();
   g_vibrator.runCoroutine();
-  g_i2c.runCoroutine();
 #endif
 }
