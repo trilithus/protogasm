@@ -1,6 +1,10 @@
 #pragma GCC push_options
 #pragma GCC optimize ("Os")
 
+
+//defines NOGASM_WIFI_SSID & NOGASM_WIFI_PASS:
+#include "nogasm_wifi.h"
+
 //#define CMD_DEBUG 1
 
 // Protogasm Code, forked from Nogasm Code Rev. 3
@@ -42,15 +46,19 @@
  * to reset.
  */
 //=======Libraries===============================
+#include <Arduino.h>
+#define ENCODER_DO_NOT_USE_INTERRUPTS //for encoder.h
 #include <Encoder.h>
 #include <EEPROM.h>
 #include "FastLED.h"
 #include <MovingAveragePlus.h> //using custom version from https://github.com/trilithus/MovingAveragePlus
-#include <Arduino.h>
 #include <AceRoutine.h>
 #include "commandmanager.h"
 #include "sharedcommands.h"
 #include <avr/pgmspace.h>
+#include <WiFiS3.h>
+#include <CircularBuffer.h>
+#include <MemoryFree.h>
 using namespace ace_routine;
 
 //Running pressure average array length and update frequency
@@ -223,7 +231,7 @@ template <typename T>
 T clamp(const T val, const T minVal, const T maxVal) { return (val<minVal) ? minVal : (val>maxVal ? maxVal : val); };
 
 //======= DEBUG ===============================
-#define DEBUG_LOG_ENABLED 0
+#define DEBUG_LOG_ENABLED 1
 #define PROFILING_ENABLED 0
 
 #if defined(DEBUG_LOG_ENABLED) && DEBUG_LOG_ENABLED!=0
@@ -243,7 +251,7 @@ T clamp(const T val, const T minVal, const T maxVal) { return (val<minVal) ? min
 #define AUTOEDGE_TIME_ADDR 8 //8,9
 
 //#define RAMPSPEED_ADDR    4 //For now, ramp speed adjustments aren't implemented
-
+#if 1
 //=======Hardware Coroutines=========================
 class Logic : Coroutine
 {
@@ -254,7 +262,7 @@ class Logic : Coroutine
     void run_edge_control();
     void run_manual_motor_control();
     void update_current_status();
-    void check_session();
+    void log_session();
     PhysBtnState check_button();
     void run_state_machine(MachineStates state);
     MachineStates change_state(MachineStates newState);
@@ -416,6 +424,43 @@ unsigned long LCD::_lastTargetChange = 0;
 LCD::lcdrender_t LCD::lcdrender_activefunc = nullptr;
 U8G2_SSD1306_128X32_UNIVISION_1_HW_I2C LCD::u8g2(U8G2_R0, /* reset=*/ U8X8_PIN_NONE);
 
+struct LogData
+{
+  int32_t param1{};
+  int32_t param2{};
+  int32_t param3{};
+  int32_t param4{};
+  int32_t param5{};
+  int32_t param6{};
+};
+
+class WIFI : public Coroutine
+{
+  private:
+    struct internalLog
+    {
+      uint64_t time=0;
+      LogData data{};
+    };
+    std::string _session;
+    CircularBuffer<internalLog, 60> _buffer;
+    WiFiClient _client;
+    bool _resetSession = false;
+  private:
+    bool connect();
+    bool internalRequestSession();
+    void internalRequestSessionResponse();
+    void internalSendLog(const internalLog& logData);
+  public:
+    void Setup();
+    void Update();
+
+    virtual int runCoroutine() override;
+
+    void LogBeginSession() { _resetSession = true; }
+    void LogEndSession();
+    void LogSessionTick(unsigned long long, const LogData& logData);
+  } g_wifi;
 
 /////////////////////////////////////////////////////
 // LCD
@@ -696,8 +741,13 @@ namespace bitmaps
   #define heart_height 16
   #if 1
 
+#if !defined(max)
   static constexpr uint8_t buffersz = std::max(std::max(sizeof(bitmaps::connected_bits), sizeof(bitmaps::heart_bits)),
                                                                        sizeof(bitmaps::heart_bits_crossed));
+#else
+  static constexpr uint8_t buffersz = max(max(sizeof(bitmaps::connected_bits), sizeof(bitmaps::heart_bits)),
+                                                                       sizeof(bitmaps::heart_bits_crossed));
+#endif
 
   uint8_t realBuffer[buffersz];
   uint8_t* buffer = &realBuffer[0]; //(uint8_t*)malloc(buffersz);
@@ -873,7 +923,7 @@ void LEDs::Update()
 // Sensor
 void Sensor::Setup()
     {
-      analogReference(AR_INTERNAL);//(EXTERNAL);
+      analogReference(AR_EXTERNAL);//(EXTERNAL);
       pinMode(BUTTPIN, INPUT); //default is 10 bit resolution (1024), 0-3.3
       g_raOverallPressure.clear(); 
       g_raImmediatePressure.clear();
@@ -1011,7 +1061,7 @@ int Logic::runCoroutine()
         run_state_machine(_state);
         FastLED.show(); //Update the physical LEDs to match the buffer in software
 
-        check_session();
+        log_session();
 
         COROUTINE_YIELD();
       }
@@ -1019,7 +1069,7 @@ int Logic::runCoroutine()
 
 void Logic::Setup()
 {
-  pinMode(ENC_SW,   INPUT); //Pin to read when encoder is pressed
+  pinMode(ENC_SW,   INPUT_PULLUP); //Pin to read when encoder is pressed
   digitalWrite(ENC_SW, HIGH); // Encoder switch pullup
 
   //Storage:
@@ -1056,15 +1106,17 @@ void Logic::resetSession()
   _autoTimeStart = millis();
 
   if (_hasSession) {
-    SessionBeginEndCmd cmd;
-    cmd.SetValue(0);
+    //SessionBeginEndCmd cmd;
+    //cmd.SetValue(0);
     //g_i2c.SendI2CCommand(&cmd);
+    g_wifi.LogEndSession();
     delay(100);
   }
 
-  SessionBeginEndCmd cmd;
-  cmd.SetValue(1);
+  //SessionBeginEndCmd cmd;
+  //cmd.SetValue(1);
   //g_i2c.SendI2CCommand(&cmd);
+  g_wifi.LogBeginSession();
   _hasSession = true;
 }
 
@@ -1332,14 +1384,23 @@ void Logic::update_current_status()
   }
 }
 
-void Logic::check_session()
+void Logic::log_session()
 {
-  unsigned long now = millis();
+  static unsigned long lastTick = 0;
 
-  if(_hasSession)
+  auto now = millis();
+  if(_hasSession && (lastTick+1000 < now))
   {
-    //check if we need to notify anyone that we have a session
-    //...command was sent here
+    lastTick = now;
+    g_wifi.LogSessionTick(
+        now, 
+        {int32_t(g_motSpeed), 
+        int32_t(g_currentPressure), 
+        int32_t(g_avgPressure), 
+        int32_t(g_currentPressure - g_avgPressure), 
+        int32_t(pLimit), 
+        int32_t(g_logic.GetCooldown()*1000.0f)}
+    );
   }
 }
 
@@ -1568,20 +1629,253 @@ void profile(int storageID, ProfiledFunc profiledFunc)
       Serial.print(times[i]);
       Serial.print(F(" max: "));
       Serial.println(maxTime[i]);
+      if (maxTime[i]>0)
+      {
+        maxTime[i]--;
+      }
     }
   }
 }
 #endif
+#endif
+
+/////////////////////////////////////////////////////
+// LCD
+int WIFI::runCoroutine()
+{
+  COROUTINE_LOOP()
+  {
+      #if 1
+      static uint64_t timeout = 1000;
+      static auto status = wl_status_t::WL_DISCONNECTED;
+      while (status != WL_CONNECTED && status != WL_IDLE_STATUS)
+      {
+        WiFi.setTimeout(timeout);
+        WiFi.begin(NOGASM_WIFI_SSID, NOGASM_WIFI_PASS);
+
+        static auto start = millis();
+        start = millis();
+        while (WiFi.status() != WL_CONNECTED && millis()<(start+timeout))
+        {
+          COROUTINE_DELAY(15);
+        }
+        status = static_cast<wl_status_t>(WiFi.status());
+        if(status != WL_CONNECTED)
+        {
+          WiFi.end();
+          Serial.print("Wifi connection failed... error code: ");
+          Serial.print(status);
+          Serial.println(", retrying");
+          timeout += 1000;
+          COROUTINE_DELAY(1000*1);
+        }
+        else
+        {
+          Serial.println("Wifi connected!");
+          COROUTINE_DELAY(1000*1);
+        }
+      }
+    #endif
+
+    //refresh status, make sure we haven't disconnected...
+    static uint64_t lastTick = millis();
+    if (millis() > lastTick+1000)
+    {
+      status = static_cast<wl_status_t>(WiFi.status());
+      if(status != WL_CONNECTED && status != WL_IDLE_STATUS)
+      {
+        WiFi.end();
+        Serial.print("Lost wifi connection, status: ");
+        Serial.println(status);
+      }
+    }
+
+    if (status == WL_CONNECTED)
+    {
+      if (_resetSession)
+      {
+        static bool success;
+        success = internalRequestSession();
+        if (!success)
+        {
+          Serial.println("request failed");
+          COROUTINE_DELAY(1000 * 60);
+        }
+        else
+        {
+          while(!_client.available())
+          {
+            COROUTINE_DELAY(10);
+          }
+          internalRequestSessionResponse();
+        }
+        COROUTINE_YIELD();
+      }
+
+      while(WiFi.status() == WL_CONNECTED && !_buffer.isEmpty())
+      {
+        if (connect())
+        {
+          const auto start = millis();
+          internalSendLog(_buffer.pop());
+          Serial.println(millis()-start);
+        }
+        COROUTINE_YIELD();
+      }
+    }
+    
+    COROUTINE_YIELD();
+  }
+}
+
+void WIFI::Setup()
+{
+}
+
+void WIFI::Update()
+{}
+
+bool WIFI::internalRequestSession() 
+{
+#if 1
+  //_client.stop();
+  //_client.flush();
+  Serial.println("requesting session");
+  if (connect())
+  {
+    _client.println("GET /session HTTP/1.1");
+    _client.print("Host: "); _client.println(NOGASM_LOGGER_HOST);
+    _client.println("User-Agent: ArduinoWiFi/1.1");
+    _client.println("Connection: close");
+    _client.println();
+    Serial.println("session requested, awaiting answer");
+    return true;
+  }
+  else
+  {
+    Serial.println("connection failed");
+  }
+#endif
+  return false;
+};
+
+void WIFI::internalRequestSessionResponse()
+{
+    Serial.println("reading answer");
+    auto answer =  _client.readString();
+    std::string s{answer.c_str()};
+    if (s.find("200 OK")>=0)
+    {
+      Serial.println("http answer");
+      s.erase(0, s.find_last_of("\n\n")+2);
+      _session = s.c_str();
+      Serial.println(_session.c_str());
+      _resetSession = false;
+    }
+    else
+    {
+      _resetSession = true;
+    }
+}
+
+void WIFI::internalSendLog(const internalLog& logData)
+{
+  char lbuffer[256];
+  ::sprintf(&lbuffer[0], "POST /session/%s/log HTTP/1.1", _session.c_str());
+  _client.println(&lbuffer[0]/*"POST /session/{uuid}/log HTTP/1.1"*/);
+
+  auto charsPrinted = ::sprintf(&lbuffer[0], 
+            "{"
+              "\"time\": %d,"
+              "\"param1\": %d,"
+              "\"param2\": %d,"
+              "\"param3\": %d,"
+              "\"param4\": %d,"
+              "\"param5\": %d,"
+              "\"param6\": %d"
+            "}",
+            logData.time,
+            logData.data.param1,  logData.data.param2,  logData.data.param3,
+            logData.data.param4,  logData.data.param5,  logData.data.param6);
+
+    _client.print("Host: "); _client.println(NOGASM_LOGGER_HOST);
+    _client.println("User-Agent: ArduinoWiFi/1.1");
+    _client.println("Connection: keep-alive");
+    _client.println("Keep-Alive: timeout=5, max=5000");
+    _client.print("Content-Length: "); _client.println(charsPrinted);
+    _client.println();
+    _client.println(&lbuffer[0]);
+    _client.flush();
+    Serial.println(&lbuffer[0]);
+}
+
+void WIFI::LogEndSession() 
+{
+   _buffer.clear();
+   _session.clear();
+};
+
+void WIFI::LogSessionTick(unsigned long long tick, const LogData& logData) 
+{
+  Serial.println(freeMemory());
+   if (!_buffer.isFull() && !_session.empty())
+   {
+     internalLog log;
+     log.time = tick;
+     log.data = logData;
+     _buffer.push(std::move(log));
+   }
+   else
+   {
+    //Serial.println(!_buffer.isFull() ? "buffer was not full" : "fail, buffer full");
+    //Serial.println(!_session.empty() ? "session was set" : "fail, session not set");
+   }
+};
+
+bool WIFI::connect()
+{
+  if (!_client.connected())
+  {
+    _client.stop();
+    
+    // print the SSID of the network you're attached to:
+    Serial.print("SSID: ");
+    Serial.println(WiFi.SSID());
+
+
+    // print your board's IP address:
+
+    IPAddress ip = WiFi.localIP();
+    Serial.print("IP Address: ");
+    Serial.println(ip);
+
+
+    // print the received signal strength:
+
+    long rssi = WiFi.RSSI();
+    Serial.print("signal strength (RSSI):");
+    Serial.print(rssi);
+    Serial.println(" dBm");
+
+    const auto rt = _client.connect(NOGASM_LOGGER_HOST, NOGASM_LOGGER_PORT);
+    delay(500);
+    return rt;
+  }
+  return true;
+}
 
 //=======Setup=======================================
 void setup() 
 {
-  Serial.begin(230400); delay(100); DEBUG_ONLY(Serial.println(F("Serial up"))); Serial.flush();
+  Serial.begin(9600); delay(100); DEBUG_ONLY(Serial.println(F("Serial up"))); Serial.flush();
+  #if 1
   g_sensor.Setup();  delay(100); DEBUG_ONLY(Serial.println(F("Sensor up"))); Serial.flush();
   g_logic.Setup();  delay(100); DEBUG_ONLY(Serial.println(F("Logic up"))); Serial.flush();
   g_lcd.Setup();  delay(100); DEBUG_ONLY(Serial.println(F("LCD up"))); Serial.flush();
   g_leds.Setup();  delay(100); DEBUG_ONLY(Serial.println(F("LEDS up"))); Serial.flush();
   g_vibrator.Setup();  delay(100); DEBUG_ONLY(Serial.println(F("Vibrator up"))); Serial.flush();
+  g_wifi.Setup();  delay(100); DEBUG_ONLY(Serial.println(F("Wifi up"))); Serial.flush();
+  #endif
   Serial.println(F("Started up"));
 }
 
@@ -1589,17 +1883,22 @@ void setup()
 void loop() 
 {
   static bool rendered = false;
-#if 0
+  //myEnc.read();
+#if 1
+#if defined(PROFILING_ENABLED) && PROFILING_ENABLED==1
   profile(0, [](){ g_sensor.runCoroutine(); });
   profile(1, [](){ g_logic.runCoroutine(); });
   profile(2, [](){ g_lcd.runCoroutine(); });
   profile(3, [](){ g_leds.runCoroutine(); });
   profile(4, [](){ g_vibrator.runCoroutine(); });
+  profile(5, [](){ g_wifi.runCoroutine(); });
 #else
   g_sensor.runCoroutine(); 
   g_logic.runCoroutine();
   g_lcd.runCoroutine();
   g_leds.runCoroutine();
   g_vibrator.runCoroutine();
+  g_wifi.runCoroutine();
+#endif
 #endif
 }
