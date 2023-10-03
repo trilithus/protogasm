@@ -19,6 +19,10 @@ type LogStruct struct {
 }
 
 func main() {
+	if info, err := os.Stat("data"); err != nil || !info.IsDir() {
+		os.Mkdir("data", os.ModePerm)
+	}
+
 	// Create a new Gorilla Mux router.
 	r := mux.NewRouter()
 
@@ -63,12 +67,14 @@ func putSessionLog(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	filePath := "./data/" + uuid + ".txt"
+
 	fileIsNew := false
-	if info, err := os.Stat(uuid + ".txt"); err != nil || info.IsDir() {
+	if info, err := os.Stat(filePath); err != nil || info.IsDir() {
 		fileIsNew = true
 	}
 
-	file, err := os.OpenFile(uuid+".txt", os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0644)
+	file, err := os.OpenFile(filePath, os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0644)
 	if err != nil {
 		log.Fatal(err)
 	}
