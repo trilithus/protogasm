@@ -1,10 +1,12 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
+	"os"
 
 	"github.com/google/uuid"
 	"github.com/gorilla/mux"
@@ -45,6 +47,8 @@ func getSession(w http.ResponseWriter, r *http.Request) {
 
 	randomUUID := uuid.New().String()
 	w.Write([]byte(randomUUID))
+
+	fmt.Printf("Gave session id {%s}\n", randomUUID)
 }
 
 func putSessionLog(w http.ResponseWriter, r *http.Request) {
@@ -59,9 +63,30 @@ func putSessionLog(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	fileIsNew := false
+	if info, err := os.Stat(uuid + ".txt"); err != nil || info.IsDir() {
+		fileIsNew = true
+	}
+
+	file, err := os.OpenFile(uuid+".txt", os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0644)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer file.Close()
+
+	if fileIsNew {
+		file.WriteString("time,motorspeed,current_pressure,avg_pressure,delta_pressure,limit,cooldown\r\n")
+	}
+
 	// Perform any necessary processing on the request body here.
-	fmt.Println(string(uuid))
-	fmt.Println(string(body))
+	d := map[string]int64{}
+	if err := json.Unmarshal(body, &d); err == nil {
+		file.WriteString(fmt.Sprintf("%d,%d,%d,%d,%d,%d,%d\r\n", d["time"],
+			d["param1"], d["param2"], d["param3"],
+			d["param4"], d["param5"], d["param6"]))
+	} else {
+		fmt.Println(err.Error())
+	}
 
 	// Respond with a 200 OK status.
 	w.WriteHeader(http.StatusOK)
