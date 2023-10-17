@@ -1,9 +1,14 @@
 #pragma GCC push_options
-#pragma GCC optimize ("Os")
+//#pragma GCC optimize ("Os")
+//#pragma GCC optimize ("O2")
+//#pragma GCC optimize ("Od")
 
+#define DEBUG_LOG_ENABLED 1
+#define PROFILING_ENABLED 0
 
 //defines NOGASM_WIFI_SSID & NOGASM_WIFI_PASS:
 #include "nogasm_wifi.h"
+#include "bufferedwificlient.h"
 
 //#define CMD_DEBUG 1
 
@@ -47,7 +52,7 @@
  */
 //=======Libraries===============================
 #include <Arduino.h>
-#define ENCODER_DO_NOT_USE_INTERRUPTS //for encoder.h
+//#define ENCODER_DO_NOT_USE_INTERRUPTS //for encoder.h
 #include <Encoder.h>
 #include <EEPROM.h>
 #include "FastLED.h"
@@ -99,7 +104,7 @@ MovingAveragePlus<uint16_t, uint32_t, 8> g_raImmediatePressure;
 
 //Encoder
 #define ENC_SW   5 //Pushbutton on the encoder
-Encoder myEnc(3, 2); //Quadrature inputs
+Encoder* myEnc = nullptr; //Quadrature inputs
 #define ENC_SW_UP   HIGH
 #define ENC_SW_DOWN LOW
 
@@ -183,16 +188,20 @@ enum class MenuItemsEnum : uint8_t
   automatic_input_min,
   automatic_input_max,
   automatic_back,
+  toggle_online,
   resetSession,
+  select_host,
   back,
   LAST,
 };
 
 MenuItemsEnum g_rootMenu[] {
   MenuItemsEnum::INVALID,
-  MenuItemsEnum::test,
-  MenuItemsEnum::manual,
   MenuItemsEnum::automatic,
+  MenuItemsEnum::manual,
+  MenuItemsEnum::test,
+  MenuItemsEnum::toggle_online,
+  MenuItemsEnum::select_host,
   MenuItemsEnum::resetSession,
   MenuItemsEnum::LAST,
 };
@@ -201,6 +210,7 @@ MenuItemsEnum g_automaticMenu[] {
   MenuItemsEnum::INVALID,
   MenuItemsEnum::automatic_start,
   MenuItemsEnum::automatic_continue,
+  MenuItemsEnum::toggle_online,
   MenuItemsEnum::automatic_input_time,
   MenuItemsEnum::automatic_input_min,
   MenuItemsEnum::automatic_input_max,
@@ -208,32 +218,29 @@ MenuItemsEnum g_automaticMenu[] {
   MenuItemsEnum::LAST,
 };
 
-void getMenuItemLabels(MenuItemsEnum pValue, String& output)
-{
-  switch(pValue)
-  {
-    case MenuItemsEnum::test: output = F("Mode: Test"); return;
-    case MenuItemsEnum::manual: output = F("Mode: Manual Edging"); return;
-    case MenuItemsEnum::automatic: output = F("Mode: Automatic"); return;
-    case MenuItemsEnum::automatic_start: output = F("Start"); return;
-    case MenuItemsEnum::automatic_continue: output = F("Continue"); return;
-    case MenuItemsEnum::automatic_input_time: output = F("Duration: "); return;
-    case MenuItemsEnum::automatic_input_min: output = F("Start treshold: "); return;
-    case MenuItemsEnum::automatic_input_max: output = F("End treshold: "); return;
-    case MenuItemsEnum::automatic_back: output = F("[ Back ]"); return;
-    case MenuItemsEnum::resetSession: output = F("Reset Session"); return;
-    case MenuItemsEnum::LAST: output = F("!ERROR!"); return;
-  }
-}
-
 //Utility
 template <typename T>
 T clamp(const T val, const T minVal, const T maxVal) { return (val<minVal) ? minVal : (val>maxVal ? maxVal : val); };
 
-//======= DEBUG ===============================
-#define DEBUG_LOG_ENABLED 1
-#define PROFILING_ENABLED 0
+void spareDebugPrint(const char* pStr)
+{
+  static auto lastPrint = millis();
+  if (millis()>lastPrint+1000)
+  {
+    Serial.print(pStr);
+  }
+}
 
+void spareDebugPrintln(const char* pStr)
+{
+  static auto lastPrint = millis();
+  if (millis()>lastPrint+1000)
+  {
+    Serial.println(pStr);
+  }
+}
+
+//======= DEBUG ===============================
 #if defined(DEBUG_LOG_ENABLED) && DEBUG_LOG_ENABLED!=0
 #define DEBUG_ONLY(...) __VA_ARGS__
 #else
@@ -243,12 +250,13 @@ T clamp(const T val, const T minVal, const T maxVal) { return (val<minVal) ? min
 
 //=======EEPROM Addresses============================
 //128b available on teensy LC
-#define BEEP_ADDR         1
-#define MAX_SPEED_ADDR    2
-#define SENSITIVITY_ADDR  3
-#define AUTOEDGE_MIN_ADDR 4 //4,5
-#define AUTOEDGE_MAX_ADDR 6 //6,7
-#define AUTOEDGE_TIME_ADDR 8 //8,9
+#define EEPROM_ONLINEMODE_ADDR   0*4
+#define EEPROM_MAX_SPEED_ADDR    1*4
+#define EEPROM_SENSITIVITY_ADDR  2*4
+#define AUTOEDGE_MIN_ADDR        3*4
+#define AUTOEDGE_MAX_ADDR        4*4
+#define AUTOEDGE_TIME_ADDR       5*4
+#define EEPROM_SELECTEDHOST_ADDR 6*4
 
 //#define RAMPSPEED_ADDR    4 //For now, ramp speed adjustments aren't implemented
 #if 1
@@ -267,6 +275,7 @@ class Logic : Coroutine
     void run_state_machine(MachineStates state);
     MachineStates change_state(MachineStates newState);
     void resetSession();
+    void clearSession();
   public:
     void Setup();
     MachineStates getState() const { return _state; }
@@ -444,8 +453,13 @@ class WIFI : public Coroutine
     };
     std::string _session;
     CircularBuffer<internalLog, 60> _buffer;
-    WiFiClient _client;
+    uint64_t _sessionStartTime=0;
+    uint64_t _wantsToBeOnlineStartTime = 0;
+    int16_t _selectedHost = 0;
+    uint8_t _onlineMode = 1;
+    bool _connected = false;
     bool _resetSession = false;
+    bool _wantsToBeOnline = false;
   private:
     bool connect();
     bool internalRequestSession();
@@ -457,13 +471,68 @@ class WIFI : public Coroutine
 
     virtual int runCoroutine() override;
 
-    void LogBeginSession() { _resetSession = true; }
+    void LogBeginSession() { _session.clear(); _resetSession = true; }
     void LogEndSession();
     void LogSessionTick(unsigned long long, const LogData& logData);
+
+    void ClearSession() { _session.clear(); _resetSession = false; }
+    void FlagDisconnected() { _connected=false; };
+    bool IsConnected() const { return _connected; }
+
+    bool GetOnlineMode() const { return (_onlineMode!=0); }
+    void SetOnlineMode(bool pMode, bool pPersist);
+    bool ShouldConnect() const {  return (_onlineMode!=0) && _wantsToBeOnline; }
+
+    bool GetWantsToBeOnline() const { return _wantsToBeOnline; }
+    void SetWantsToBeOnline() { 
+      Serial.println("want to be online"); 
+      if (!_wantsToBeOnline)
+      {
+        _wantsToBeOnlineStartTime=millis(); 
+        _wantsToBeOnline = true; }
+      }
+    void SetWantsToBeOffline() { Serial.println("stay offline"); _wantsToBeOnline = false; }
+    uint64_t GetWantsToBeOnlineStartTime() const { return _wantsToBeOnlineStartTime; }
+
+    int16_t GetSelectedHost() const { return _selectedHost; }
+    int16_t* GetSelectedHostPtr() { return &_selectedHost; }
   } g_wifi;
+
+class WIFIWriter : public Coroutine
+{
+private:
+  BufferedWiFiClient<64> _client;
+public:
+  void Setup() {};
+  void Update() {};
+
+  virtual int runCoroutine() override;
+  BufferedWiFiClient<64>& GetClient() { return _client; }
+} g_WifiWriter;
 
 /////////////////////////////////////////////////////
 // LCD
+
+void getMenuItemLabels(MenuItemsEnum pValue, String& output)
+{
+  switch(pValue)
+  {
+    case MenuItemsEnum::test: output = F("Mode: Test"); return;
+    case MenuItemsEnum::manual: output = F("Mode: Manual Edging"); return;
+    case MenuItemsEnum::automatic: output = F("Mode: Automatic"); return;
+    case MenuItemsEnum::automatic_start: output = F("Start"); return;
+    case MenuItemsEnum::automatic_continue: output = F("Continue"); return;
+    case MenuItemsEnum::automatic_input_time: output = F("Duration: "); return;
+    case MenuItemsEnum::automatic_input_min: output = F("Start treshold: "); return;
+    case MenuItemsEnum::automatic_input_max: output = F("End treshold: "); return;
+    case MenuItemsEnum::automatic_back: output = F("[ Back ]"); return;
+    case MenuItemsEnum::select_host: output = "Host: "; output += NOGASM_LOGGER_HOST[g_wifi.GetSelectedHost()]; return;
+    case MenuItemsEnum::toggle_online: output = (g_wifi.GetOnlineMode() ? F("Go offline") : F("Go online")); return;
+    case MenuItemsEnum::resetSession: output = F("Reset Session"); return;
+    case MenuItemsEnum::LAST: output = F("!ERROR!"); return;
+  }
+}
+
 int LCD::runCoroutine()
 {
   COROUTINE_LOOP()
@@ -724,6 +793,18 @@ namespace bitmaps
       0x00, 0x00, 0xf0, 0x07, 0xf0, 0x07, 0xf0, 0x03, 0x30, 0x00, 0xb0, 0x07,
       0xbf, 0xff, 0xff, 0xff, 0xbf, 0xff, 0xb0, 0x07, 0x30, 0x00, 0xf0, 0x03,
       0xf0, 0x03, 0xf0, 0x03, 0x00, 0x00, 0x00, 0x00};
+
+  static const uint8_t wifi_on_bits[] PROGMEM = {
+      0x00, 0x00, 0x00, 0x00, 0xF8, 0x1F, 0xFE, 0x7F, 0x0F, 0xF0, 0xE3, 0xC7, 
+      0xF9, 0x9F, 0x1C, 0x38, 0xCC, 0x33, 0xE0, 0x07, 0x70, 0x0E, 0x30, 0x0C, 
+      0x80, 0x01, 0x80, 0x01, 0x80, 0x01, 0x00, 0x00
+  };
+
+  static const uint8_t wifi_off_bits[] PROGMEM = {
+      0x00, 0xC0, 0x00, 0xE0, 0x00, 0x70, 0xFC, 0x3F, 0x0E, 0x7C, 0x03, 0xCE, 
+      0xF1, 0x8F, 0x98, 0x1B, 0xCC, 0x31, 0xE0, 0x03, 0x70, 0x06, 0x38, 0x0C, 
+      0x1C, 0x00, 0x8E, 0x01, 0x87, 0x01, 0x03, 0x00
+  };
 }
 
   void LCD::lcdfunc_edgeCount()
@@ -757,7 +838,15 @@ namespace bitmaps
   {
     buffer[i] = pgm_read_byte_near((g_motSpeed >= 0.01f ? bitmaps::heart_bits : bitmaps::heart_bits_crossed) +i);
   }
+  u8g2.drawXBM(u8g2.getDisplayWidth() - (heart_width * 2) - heart_width/3, 0, heart_width, heart_height, buffer);
+
+
+  for(uint8_t i=0; i < sizeof(bitmaps::wifi_on_bits); i++)
+  {
+    buffer[i] = pgm_read_byte_near((g_wifi.IsConnected() ? bitmaps::wifi_on_bits : bitmaps::wifi_off_bits) +i);
+  }
   u8g2.drawXBM(u8g2.getDisplayWidth() - heart_width, 0, heart_width, heart_height, buffer);
+
 
   //free(buffer);
   #else
@@ -1073,20 +1162,19 @@ void Logic::Setup()
   digitalWrite(ENC_SW, HIGH); // Encoder switch pullup
 
   //Storage:
-  sensitivity = EEPROM.read(SENSITIVITY_ADDR);
-  g_MaxSpeed = min(EEPROM.read(MAX_SPEED_ADDR), MOT_MAX); //Obey the MOT_MAX the first power  cycle after chaning it.
-
-    
+  sensitivity = EEPROM.read(EEPROM_SENSITIVITY_ADDR);
+  g_MaxSpeed = 254;//min(EEPROM.read(EEPROM_MAX_SPEED_ADDR), MOT_MAX); //Obey the MOT_MAX the first power  cycle after chaning it.
 
   _automatic_edge_time_minutes = clamp(EEPROM.get<int16_t>(AUTOEDGE_TIME_ADDR, _automatic_edge_time_minutes), int16_t(0), int16_t(1800));
   _automatic_edge_mintarget = clamp(EEPROM.get<int16_t>(AUTOEDGE_MIN_ADDR, _automatic_edge_mintarget), int16_t(0), int16_t(1000));
   _automatic_edge_maxtarget = clamp(EEPROM.get<int16_t>(AUTOEDGE_MAX_ADDR, _automatic_edge_maxtarget), int16_t(0), int16_t(1000));
+  Serial.print("[SETUP] edge time in minutes:");
+  Serial.println(_automatic_edge_time_minutes);
 
   _currentMenuItem = &g_rootMenu[1];
   _currentMenuItemState.isFirst = true;
   _currentMenuItemState.isLast = false;
   change_state(MachineStates::menu);
-  resetSession();
 }
 
 #define DEFAULT_COOLDOWN_s 45.0f
@@ -1106,18 +1194,18 @@ void Logic::resetSession()
   _autoTimeStart = millis();
 
   if (_hasSession) {
-    //SessionBeginEndCmd cmd;
-    //cmd.SetValue(0);
-    //g_i2c.SendI2CCommand(&cmd);
     g_wifi.LogEndSession();
     delay(100);
   }
 
-  //SessionBeginEndCmd cmd;
-  //cmd.SetValue(1);
-  //g_i2c.SendI2CCommand(&cmd);
   g_wifi.LogBeginSession();
   _hasSession = true;
+}
+
+void Logic::clearSession()
+{
+  g_wifi.ClearSession();
+  _hasSession = false;
 }
 
 void Logic::run_menu()
@@ -1149,7 +1237,29 @@ void Logic::run_menu()
           _readVariableMax = 1500;
           change_state(MachineStates::read_variable); 
         } break;
+        case MenuItemsEnum::select_host: { 
+          _readVariable = g_wifi.GetSelectedHostPtr();
+          _readVariableMin = 0;
+          _readVariableMax = 1;
+          change_state(MachineStates::read_variable); 
+        } break;
         case MenuItemsEnum::automatic_back: { _currentMenuItem = &g_rootMenu[1]; } break;
+        case MenuItemsEnum::toggle_online: { 
+          Serial.println(g_wifi.GetOnlineMode() ? "toggle_online, onlinemode = true" : "toggle_online, onlinemode = false");
+          volatile const bool newMode = !(g_wifi.GetOnlineMode());
+          if (newMode)
+          {
+            g_wifi.SetWantsToBeOnline();
+          }
+          else
+          {
+            g_wifi.SetWantsToBeOffline();
+          }
+          Serial.print("writing to eeprom: ");
+          Serial.println(newMode ? "true" : "false");
+          Serial.flush();
+          g_wifi.SetOnlineMode(newMode, true);
+        } break;
         case MenuItemsEnum::resetSession: { resetSession(); }; break;
       }
   }
@@ -1157,7 +1267,7 @@ void Logic::run_menu()
   _currentMenuItemState.isFirst = (*_currentMenuItem == MenuItemsEnum::INVALID) || (*(_currentMenuItem-1) == MenuItemsEnum::INVALID);
   _currentMenuItemState.isLast = *(_currentMenuItem+1) == MenuItemsEnum::LAST;
 
-  const auto knob = myEnc.read();
+  const auto knob = myEnc->read();
   const auto delta = knob - _menuKnobState;
   if (delta >= 4)
   {
@@ -1185,7 +1295,7 @@ void Logic::run_read_variable()
   displayTxt += F(" <");
   LCD::setLCDFunc(LCD::lcdfunc_renderText, displayTxt.c_str());
 
-  const auto knob = myEnc.read();
+  const auto knob = myEnc->read();
   const auto delta = knob - _menuKnobState;
 
   if (delta >= 4)
@@ -1271,7 +1381,8 @@ void Logic::run_edge_control()
   }
 
   //When someone clenches harder than the pressure limit
-  if (g_currentPressure - g_avgPressure > (pLimit+limitOffset)) {
+  if (g_currentPressure - g_avgPressure > (pLimit+limitOffset)) 
+  {
     if (g_motSpeed > 0.0f)
     {
       #if (defined(EDGEALGORITHM) && EDGEALGORITHM==1)
@@ -1309,9 +1420,7 @@ void Logic::run_edge_control()
     #elif (defined(EDGEALGORITHM) && EDGEALGORITHM==1)
     g_motSpeed = -_cooldown*((float)FREQUENCY*motIncrement);
     #endif
-    
-  }
-  else if (g_motSpeed < (float)g_MaxSpeed) {
+  } else if (g_motSpeed < static_cast<float>(g_MaxSpeed)) {
     g_motSpeed += motIncrement;
   }
 
@@ -1453,11 +1562,11 @@ MachineStates Logic::change_state(MachineStates newState)
       } break;
       case MachineStates::manual_edge_control: 
       {
-        EEPROM.update(SENSITIVITY_ADDR, sensitivity);
+        EEPROM.update(EEPROM_SENSITIVITY_ADDR, sensitivity);
       } break;
       case MachineStates::auto_edge_control: 
       {
-        EEPROM.update(SENSITIVITY_ADDR, sensitivity);
+        EEPROM.update(EEPROM_SENSITIVITY_ADDR, sensitivity);
         _autoEdgeTargetOffset = 0;
       } break;
       default: g_lcd.RenderPanic(F("State not implemented!")); break;
@@ -1468,37 +1577,44 @@ MachineStates Logic::change_state(MachineStates newState)
       case MachineStates::UNDEFINED: {} break;
       case MachineStates::menu: 
       {
-        _menuKnobState = myEnc.read();
+        g_wifi.SetWantsToBeOffline();
+        clearSession();
+        _menuKnobState = myEnc->read();
         g_vibrator.vibrator_off();
       } break;
       case MachineStates::read_variable: {} break;
       case MachineStates::manual_motor_control: 
       {
+        g_wifi.SetWantsToBeOffline();
         g_vibrator.vibrator_reset();
         g_vibrator.vibrator_on();
       } break;
       case MachineStates::manual_edge_control: 
       {
         //Restore last sensitivity value:
-        sensitivity = EEPROM.read(SENSITIVITY_ADDR);
-        myEnc.write(sensitivity);
+        g_wifi.SetWantsToBeOnline();
+        sensitivity = EEPROM.read(EEPROM_SENSITIVITY_ADDR);
+        myEnc->write(sensitivity);
         g_vibrator.vibrator_reset();
         g_vibrator.vibrator_on();
       } break;
       case MachineStates::auto_edge_control: 
       {
         //Store target settings in eeprom:
+        g_wifi.SetWantsToBeOnline();
         EEPROM.put<int16_t>(AUTOEDGE_TIME_ADDR, _automatic_edge_time_minutes);
         EEPROM.put<int16_t>(AUTOEDGE_MIN_ADDR, _automatic_edge_mintarget);
         EEPROM.put<int16_t>(AUTOEDGE_MAX_ADDR, _automatic_edge_maxtarget);
+        Serial.print("_automatic_edge_time_minutes = ");
+        Serial.println(_automatic_edge_time_minutes);
         if (_autoTimeStart==0)
         {
           _autoTimeStart = millis();
         }
 
         //Restore last sensitivity value:
-        sensitivity = EEPROM.read(SENSITIVITY_ADDR);
-        myEnc.write(sensitivity);
+        sensitivity = EEPROM.read(EEPROM_SENSITIVITY_ADDR);
+        myEnc->write(sensitivity);
         g_vibrator.vibrator_reset();
         g_vibrator.vibrator_on();
       } break;
@@ -1524,23 +1640,23 @@ MachineStates Logic::change_state(MachineStates newState)
   else if(btnState == BTN_SHORT){
     switch(state){
       case MachineStates::manual_motor_control:
-        myEnc.write(sensitivity);//Whenever going into auto mode, keep the last sensitivity
+        myEnc->write(sensitivity);//Whenever going into auto mode, keep the last sensitivity
         g_motSpeed = 0; //Also reset the motor speed to 0
         return MachineStates::manual_edge_control;
       case MachineStates::manual_edge_control:
-        myEnc.write(0);//Whenever going into manual mode, set the speed to 0.
+        myEnc->write(0);//Whenever going into manual mode, set the speed to 0.
         g_motSpeed = 0;
-        EEPROM.update(SENSITIVITY_ADDR, sensitivity);
+        EEPROM.update(EEPROM_SENSITIVITY_ADDR, sensitivity);
         return MachineStates::manual_motor_control;
     }
   }
   else if(btnState == BTN_LONG){
     switch (state) {
       case MachineStates::manual_motor_control:
-        myEnc.write(map(g_MaxSpeed, 0, 255, 0, 4 * (NUM_LEDS))); //start at saved value
+        myEnc->write(map(g_MaxSpeed, 0, 255, 0, 4 * (NUM_LEDS))); //start at saved value
         return MachineStates::manual_edge_control;//OPT_SPEED;
       case MachineStates::manual_edge_control:
-        myEnc.write(map(g_MaxSpeed, 0, 255, 0, 4 * (NUM_LEDS))); //start at saved value
+        myEnc->write(map(g_MaxSpeed, 0, 255, 0, 4 * (NUM_LEDS))); //start at saved value
         return MachineStates::manual_motor_control;//OPT_SPEED;
     }
   }
@@ -1597,24 +1713,24 @@ void draw_bars_3(int pos,CRGB C1, CRGB C2, CRGB C3){
 //Provide a limited encoder reading corresponting to tacticle clicks on the knob.
 //Each click passes through 4 encoder pulses. This reduces it to 1 pulse per click
 int encLimitRead(int minVal, int maxVal){
-  if(myEnc.read()>maxVal*4)myEnc.write(maxVal*4);
-  else if(myEnc.read()<minVal*4) myEnc.write(minVal*4);
-  return constrain(myEnc.read()/4,minVal,maxVal);
+  if(myEnc->read()>maxVal*4)myEnc->write(maxVal*4);
+  else if(myEnc->read()<minVal*4) myEnc->write(minVal*4);
+  return constrain(myEnc->read()/4,minVal,maxVal);
 }
 
 #if defined(PROFILING_ENABLED) && PROFILING_ENABLED==1
 using ProfiledFunc = void (*)();
 void profile(int storageID, ProfiledFunc profiledFunc)
 {
-  static constexpr uint8_t profilecount = 6;
-  static uint8_t times[profilecount]={};
-  static uint8_t maxTime[profilecount]={};
+  static constexpr uint8_t profilecount = 10;
+  static uint16_t times[profilecount]={};
+  static uint16_t maxTime[profilecount]={};
   const auto now = millis();
   profiledFunc();
   const auto diff = millis()-now;
   times[storageID] += diff;
   times[storageID] /= 2;
-  maxTime[storageID] = max(maxTime[storageID], min(diff,255));
+  maxTime[storageID] = max(maxTime[storageID], min(diff,0xFFFFul));
 
   static uint32_t lastReport = now;
   if (now > lastReport+1000)
@@ -1631,7 +1747,7 @@ void profile(int storageID, ProfiledFunc profiledFunc)
       Serial.println(maxTime[i]);
       if (maxTime[i]>0)
       {
-        maxTime[i]--;
+        maxTime[i] -= std::min(uint16_t(maxTime[i]/10), maxTime[i]);
       }
     }
   }
@@ -1639,23 +1755,59 @@ void profile(int storageID, ProfiledFunc profiledFunc)
 #endif
 #endif
 
+#define ProfileBlock(pTreshold, pMsg)                                                                 \
+    struct TimerLogger##__LINE__                                                                      \
+    {                                                                                                 \
+      struct inner                                                                                    \
+      {                                                                                               \
+        uint64_t _start;                                                                              \
+        inner() : _start(millis()) {};                                                                \
+        ~inner() { if((millis()-_start)>pTreshold) { Serial.println("Timer triggered " pMsg); } }     \
+      } _inner;                                                                                       \
+    } _timer##__LINE__;
+
 /////////////////////////////////////////////////////
-// LCD
+// WIFI control
 int WIFI::runCoroutine()
 {
+  auto checkTimeout = [&](){
+      if (ShouldConnect())
+      {
+        if(!IsConnected())
+        {
+          const auto now = millis();
+          if (now > GetWantsToBeOnlineStartTime()+(1000*15))
+          {
+            SetOnlineMode(false, false);
+          }
+        } else
+        {
+          _wantsToBeOnlineStartTime = millis();
+        }
+      }
+  };
+
   COROUTINE_LOOP()
   {
+      if(!ShouldConnect())
+      {
+        return 0;
+      }
+
+      checkTimeout();
+
       #if 1
       static uint64_t timeout = 1000;
       static auto status = wl_status_t::WL_DISCONNECTED;
       while (status != WL_CONNECTED && status != WL_IDLE_STATUS)
       {
+        ProfileBlock(200, "Reconnection");
         WiFi.setTimeout(timeout);
         WiFi.begin(NOGASM_WIFI_SSID, NOGASM_WIFI_PASS);
 
         static auto start = millis();
         start = millis();
-        while (WiFi.status() != WL_CONNECTED && millis()<(start+timeout))
+        while (ShouldConnect() && WiFi.status() != WL_CONNECTED && millis()<(start+timeout))
         {
           COROUTINE_DELAY(15);
         }
@@ -1681,16 +1833,37 @@ int WIFI::runCoroutine()
     static uint64_t lastTick = millis();
     if (millis() > lastTick+1000)
     {
+      lastTick = millis();
+      ProfileBlock(200, "Wifi Status");
       status = static_cast<wl_status_t>(WiFi.status());
       if(status != WL_CONNECTED && status != WL_IDLE_STATUS)
       {
+        ProfileBlock(200, "Wifi End");
         WiFi.end();
         Serial.print("Lost wifi connection, status: ");
         Serial.println(status);
       }
+
+      auto& client = g_WifiWriter.GetClient();
+      _connected = !client.hasError() && client.connected();
+      if (!client.connected())
+      {
+        Serial.println("client disconnected");
+      }
+
+      if (client.hasError())
+      {
+        Serial.println("client has error");
+      }
+
+      if (!_connected)
+      {
+        Serial.println("server disconnected, reconnecting");
+        connect();
+      }
     }
 
-    if (status == WL_CONNECTED)
+    if (status == WL_CONNECTED && g_wifi.ShouldConnect())
     {
       if (_resetSession)
       {
@@ -1703,8 +1876,9 @@ int WIFI::runCoroutine()
         }
         else
         {
-          while(!_client.available())
+          while(ShouldConnect() && !g_WifiWriter.GetClient().available())
           {
+            spareDebugPrintln("waiting for data to become available...");
             COROUTINE_DELAY(10);
           }
           internalRequestSessionResponse();
@@ -1712,15 +1886,17 @@ int WIFI::runCoroutine()
         COROUTINE_YIELD();
       }
 
-      while(WiFi.status() == WL_CONNECTED && !_buffer.isEmpty())
       {
-        if (connect())
+        while(ShouldConnect() && WiFi.status() == WL_CONNECTED && !_buffer.isEmpty())
         {
-          const auto start = millis();
-          internalSendLog(_buffer.pop());
-          Serial.println(millis()-start);
+          if (connect())
+          {
+            ProfileBlock(200, "Wifi send log");
+            internalSendLog(_buffer.shift());
+          }
+          checkTimeout();
+          COROUTINE_YIELD();
         }
-        COROUTINE_YIELD();
       }
     }
     
@@ -1730,6 +1906,12 @@ int WIFI::runCoroutine()
 
 void WIFI::Setup()
 {
+  _onlineMode = EEPROM.get(EEPROM_ONLINEMODE_ADDR, _onlineMode);
+  Serial.println((_onlineMode!=0) ? "[STARTUP] We want to be online" : "[STARTUP] We want to be offline");
+
+  _selectedHost = std::clamp(EEPROM.get(EEPROM_SELECTEDHOST_ADDR, _selectedHost), int16_t(0), int16_t(std::size(NOGASM_LOGGER_HOST)));
+  Serial.print("[STARTUP] SelectedHost=");
+  Serial.println(_selectedHost); 
 }
 
 void WIFI::Update()
@@ -1741,13 +1923,15 @@ bool WIFI::internalRequestSession()
   //_client.stop();
   //_client.flush();
   Serial.println("requesting session");
+  auto& client = g_WifiWriter.GetClient();
   if (connect())
   {
-    _client.println("GET /session HTTP/1.1");
-    _client.print("Host: "); _client.println(NOGASM_LOGGER_HOST);
-    _client.println("User-Agent: ArduinoWiFi/1.1");
-    _client.println("Connection: close");
-    _client.println();
+    client.println("GET /session HTTP/1.1");
+    client.print("Host: "); client.println(NOGASM_LOGGER_HOST[g_wifi.GetSelectedHost()]);
+    client.println("User-Agent: ArduinoWiFi/1.1");
+    client.println("Connection: close");
+    client.println();
+    client.flushOut(-1);
     Serial.println("session requested, awaiting answer");
     return true;
   }
@@ -1762,15 +1946,19 @@ bool WIFI::internalRequestSession()
 void WIFI::internalRequestSessionResponse()
 {
     Serial.println("reading answer");
-    auto answer =  _client.readString();
+    auto& client = g_WifiWriter.GetClient();
+    auto answer =  client.readString();
     std::string s{answer.c_str()};
     if (s.find("200 OK")>=0)
     {
       Serial.println("http answer");
       s.erase(0, s.find_last_of("\n\n")+2);
       _session = s.c_str();
+      _sessionStartTime = millis();
       Serial.println(_session.c_str());
       _resetSession = false;
+      client.stop();
+      _connected = false;
     }
     else
     {
@@ -1780,44 +1968,57 @@ void WIFI::internalRequestSessionResponse()
 
 void WIFI::internalSendLog(const internalLog& logData)
 {
-  char lbuffer[256];
-  ::sprintf(&lbuffer[0], "POST /session/%s/log HTTP/1.1", _session.c_str());
-  _client.println(&lbuffer[0]/*"POST /session/{uuid}/log HTTP/1.1"*/);
+  auto& client = g_WifiWriter.GetClient();
+  
 
-  auto charsPrinted = ::sprintf(&lbuffer[0], 
-            "{"
-              "\"time\": %d,"
-              "\"param1\": %d,"
-              "\"param2\": %d,"
-              "\"param3\": %d,"
-              "\"param4\": %d,"
-              "\"param5\": %d,"
-              "\"param6\": %d"
-            "}",
-            logData.time,
-            logData.data.param1,  logData.data.param2,  logData.data.param3,
-            logData.data.param4,  logData.data.param5,  logData.data.param6);
+  arduino::String s;
 
-    _client.print("Host: "); _client.println(NOGASM_LOGGER_HOST);
-    _client.println("User-Agent: ArduinoWiFi/1.1");
-    _client.println("Connection: keep-alive");
-    _client.println("Keep-Alive: timeout=5, max=5000");
-    _client.print("Content-Length: "); _client.println(charsPrinted);
-    _client.println();
-    _client.println(&lbuffer[0]);
-    _client.flush();
-    Serial.println(&lbuffer[0]);
+  //body:
+  s+="{"
+                    "\"time\": "; s+=static_cast<unsigned long>(logData.time-_sessionStartTime); s+=","
+                    "\"param1\": "; s+=logData.data.param1; s+=","
+                    "\"param2\": "; s+=logData.data.param2; s+=","
+                    "\"param3\": "; s+=logData.data.param3; s+=","
+                    "\"param4\": "; s+=logData.data.param4; s+=","
+                    "\"param5\": "; s+=logData.data.param5; s+=","
+                    "\"param6\": "; s+=logData.data.param6;             
+  s+="}";
+  uint16_t c=s.length();
+
+  client.print("POST /session/"); client.print(_session.c_str()); client.println("/log HTTP/1.1");
+  client.print("Host: "); client.println(NOGASM_LOGGER_HOST[g_wifi.GetSelectedHost()]);
+  client.println("User-Agent: ArduinoWiFi/1.1");
+  client.println("Connection: keep-alive");
+  client.println("Keep-Alive: timeout=5, max=5000");
+  //client.println("Connection: close");
+  client.print("Content-Length: "); client.println(c);
+  client.println();
+  client.println(s);
+  //client.flush(); //don't care about any previous responses
+  /*
+  if (c>500)
+  {
+    Serial.println("[ERROR] c>500");
+    while(true) { delay(1); }
+  }
+
+  for(int i=0; i < 500-c; i++)
+  {
+    client.print(" ");
+  }
+  */
+
+  //Serial.println(&lbuffer[0]);
 }
 
 void WIFI::LogEndSession() 
 {
    _buffer.clear();
    _session.clear();
-};
+}
 
 void WIFI::LogSessionTick(unsigned long long tick, const LogData& logData) 
 {
-  Serial.println(freeMemory());
    if (!_buffer.isFull() && !_session.empty())
    {
      internalLog log;
@@ -1830,14 +2031,34 @@ void WIFI::LogSessionTick(unsigned long long tick, const LogData& logData)
     //Serial.println(!_buffer.isFull() ? "buffer was not full" : "fail, buffer full");
     //Serial.println(!_session.empty() ? "session was set" : "fail, session not set");
    }
-};
+}
+
+void WIFI::SetOnlineMode(volatile bool pMode, bool pPersist)
+{
+  Serial.println((_onlineMode!=0) ? "Online mode was true" : "Online mode was false");
+  _onlineMode = (pMode ? 1 : 0);
+  Serial.println((_onlineMode!=0) ? "Online mode is now true" : "Online mode is now false");
+  
+  if (pPersist)
+  {
+    EEPROM.put(EEPROM_ONLINEMODE_ADDR, pMode);
+  }
+}
 
 bool WIFI::connect()
 {
-  if (!_client.connected())
+  if(!GetOnlineMode())
   {
-    _client.stop();
-    
+    return false;
+  }
+
+  auto& client = g_WifiWriter.GetClient();
+  if (!_connected)
+  {
+    client.stop();
+    client.clearError();
+    client.clear();
+
     // print the SSID of the network you're attached to:
     Serial.print("SSID: ");
     Serial.println(WiFi.SSID());
@@ -1857,16 +2078,57 @@ bool WIFI::connect()
     Serial.print(rssi);
     Serial.println(" dBm");
 
-    const auto rt = _client.connect(NOGASM_LOGGER_HOST, NOGASM_LOGGER_PORT);
-    delay(500);
-    return rt;
+    _connected = client.connect(NOGASM_LOGGER_HOST[g_wifi.GetSelectedHost()], NOGASM_LOGGER_PORT)==1;
+    if (_connected)
+    {
+      //always:
+      EEPROM.put(EEPROM_SELECTEDHOST_ADDR, _selectedHost);
+      Serial.print("Set selected host to ");
+      Serial.println(_selectedHost);
+    }
+    return _connected;
   }
   return true;
 }
 
+/////////////////////////////////////////////////////
+// WIFI writer
+int WIFIWriter::runCoroutine()
+{
+  COROUTINE_LOOP()
+  {
+    static auto start = 0ll;
+    start = millis();
+
+    if (_client.HasDataToWriteOut())
+    {
+      while(millis() < start+33)
+      {
+        while(_client.available())
+        {
+          _client.read();
+        }
+        auto wroteBytes = _client.flushOut();
+        if (wroteBytes==0)
+        {
+            COROUTINE_DELAY(50);
+            break;
+        }
+      }
+    }
+    else
+    {
+      COROUTINE_DELAY(200);
+    }
+    
+    COROUTINE_YIELD();
+  }
+}
 //=======Setup=======================================
 void setup() 
 {
+  myEnc = new Encoder(3, 2);
+
   Serial.begin(9600); delay(100); DEBUG_ONLY(Serial.println(F("Serial up"))); Serial.flush();
   #if 1
   g_sensor.Setup();  delay(100); DEBUG_ONLY(Serial.println(F("Sensor up"))); Serial.flush();
@@ -1875,6 +2137,7 @@ void setup()
   g_leds.Setup();  delay(100); DEBUG_ONLY(Serial.println(F("LEDS up"))); Serial.flush();
   g_vibrator.Setup();  delay(100); DEBUG_ONLY(Serial.println(F("Vibrator up"))); Serial.flush();
   g_wifi.Setup();  delay(100); DEBUG_ONLY(Serial.println(F("Wifi up"))); Serial.flush();
+  g_WifiWriter.Setup();  delay(100); DEBUG_ONLY(Serial.println(F("WifiWriter up"))); Serial.flush();
   #endif
   Serial.println(F("Started up"));
 }
@@ -1883,7 +2146,6 @@ void setup()
 void loop() 
 {
   static bool rendered = false;
-  //myEnc.read();
 #if 1
 #if defined(PROFILING_ENABLED) && PROFILING_ENABLED==1
   profile(0, [](){ g_sensor.runCoroutine(); });
@@ -1892,6 +2154,7 @@ void loop()
   profile(3, [](){ g_leds.runCoroutine(); });
   profile(4, [](){ g_vibrator.runCoroutine(); });
   profile(5, [](){ g_wifi.runCoroutine(); });
+  profile(7, [](){ g_WifiWriter.runCoroutine(); });
 #else
   g_sensor.runCoroutine(); 
   g_logic.runCoroutine();
@@ -1899,6 +2162,7 @@ void loop()
   g_leds.runCoroutine();
   g_vibrator.runCoroutine();
   g_wifi.runCoroutine();
+  g_WifiWriter.runCoroutine();
 #endif
 #endif
 }
