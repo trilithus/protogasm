@@ -4,11 +4,10 @@
 //#pragma GCC optimize ("Od")
 
 #define DEBUG_LOG_ENABLED 1
-#define PROFILING_ENABLED 0
+#define PROFILING_ENABLED 1
 
 //defines NOGASM_WIFI_SSID & NOGASM_WIFI_PASS:
 #include "nogasm_wifi.h"
-#include "bufferedwificlient.h"
 
 //#define CMD_DEBUG 1
 
@@ -260,8 +259,17 @@ void spareDebugPrintln(const char* pStr)
 
 //#define RAMPSPEED_ADDR    4 //For now, ramp speed adjustments aren't implemented
 #if 1
+class CustomCoroutine : public Coroutine {
+private:
+  uint8_t _suspendCount = 0;
+public:
+  void Suspend() { _suspendCount++; }
+  void Resume() { _suspendCount--; }
+  bool IsSuspended() const { return _suspendCount!=0; }
+};
+
 //=======Hardware Coroutines=========================
-class Logic : Coroutine
+class Logic : public CustomCoroutine
 {
   protected:
     void run_menu();
@@ -321,14 +329,14 @@ class Logic : Coroutine
     #endif
 } g_logic;
 
-class Sensor : Coroutine
+class Sensor : public CustomCoroutine
 {
 public:
     void Setup();
     virtual int runCoroutine() override;
 } g_sensor;
 
-class Vibrator : Coroutine
+class Vibrator : public CustomCoroutine
 {
   struct
   {
@@ -359,7 +367,7 @@ class Vibrator : Coroutine
       }
 } g_vibrator;
 
-class LEDs : Coroutine
+class LEDs : public CustomCoroutine
 {
   public:
     void Setup();
@@ -375,7 +383,7 @@ class LEDs : Coroutine
     }
 } g_leds;
 
-class LCD : public Coroutine
+class LCD : public CustomCoroutine
 {
   private:
     static U8G2_SSD1306_128X32_UNIVISION_1_HW_I2C u8g2;
@@ -443,7 +451,7 @@ struct LogData
   int32_t param6{};
 };
 
-class WIFI : public Coroutine
+class WIFI : public CustomCoroutine
 {
   private:
     struct internalLog
@@ -451,8 +459,10 @@ class WIFI : public Coroutine
       uint64_t time=0;
       LogData data{};
     };
+    uint64_t _lastPing=0;
     std::string _session;
     CircularBuffer<internalLog, 60> _buffer;
+    WiFiUDP _udpclient;
     uint64_t _sessionStartTime=0;
     uint64_t _wantsToBeOnlineStartTime = 0;
     int16_t _selectedHost = 0;
@@ -497,18 +507,6 @@ class WIFI : public Coroutine
     int16_t GetSelectedHost() const { return _selectedHost; }
     int16_t* GetSelectedHostPtr() { return &_selectedHost; }
   } g_wifi;
-
-class WIFIWriter : public Coroutine
-{
-private:
-  BufferedWiFiClient<64> _client;
-public:
-  void Setup() {};
-  void Update() {};
-
-  virtual int runCoroutine() override;
-  BufferedWiFiClient<64>& GetClient() { return _client; }
-} g_WifiWriter;
 
 /////////////////////////////////////////////////////
 // LCD
@@ -874,20 +872,30 @@ int Vibrator::runCoroutine()
     {
       //turn on:
       _currentState.powered = true;
-      digitalWrite(PIN_VIBRATOR_ONOFF, HIGH);
-      COROUTINE_DELAY(VIBRATOR_PUSH_DELAY);
-      digitalWrite(PIN_VIBRATOR_ONOFF, LOW);
-      COROUTINE_DELAY(VIBRATOR_PUSH_DELAY);
+      g_wifi.Suspend();
+      {
+        digitalWrite(PIN_VIBRATOR_ONOFF, HIGH);
+        COROUTINE_DELAY(VIBRATOR_PUSH_DELAY);
+        digitalWrite(PIN_VIBRATOR_ONOFF, LOW);
+        COROUTINE_DELAY(VIBRATOR_PUSH_DELAY);
+      }
+      g_wifi.Resume();
+
       DEBUG_ONLY(Serial.println(F("[VIBRATOR]\tTurned on")));
     }
     else if (_currentState.powered == true && _targetState.powered == false)
     {
       //turn off:
       _currentState.powered = false;
-      digitalWrite(PIN_VIBRATOR_ONOFF, HIGH);
-      COROUTINE_DELAY(VIBRATOR_PUSH_DELAY);
-      digitalWrite(PIN_VIBRATOR_ONOFF, LOW);
-      COROUTINE_DELAY(VIBRATOR_PUSH_DELAY);
+      g_wifi.Suspend();
+      {
+        digitalWrite(PIN_VIBRATOR_ONOFF, HIGH);
+        COROUTINE_DELAY(VIBRATOR_PUSH_DELAY);
+        digitalWrite(PIN_VIBRATOR_ONOFF, LOW);
+        COROUTINE_DELAY(VIBRATOR_PUSH_DELAY);
+      }
+      g_wifi.Resume();
+
       DEBUG_ONLY(Serial.println(F("[VIBRATOR]\tTurned off")));
     }
 
@@ -906,10 +914,14 @@ int Vibrator::runCoroutine()
         {
           //turn up:
           _currentState.mode++;
-          digitalWrite(PIN_VIBRATOR_UP, HIGH);
-          COROUTINE_DELAY(VIBRATOR_PUSH_DELAY);
-          digitalWrite(PIN_VIBRATOR_UP, LOW);
-          COROUTINE_DELAY(VIBRATOR_PUSH_DELAY);
+          g_wifi.Suspend();
+          {
+            digitalWrite(PIN_VIBRATOR_UP, HIGH);
+            COROUTINE_DELAY(VIBRATOR_PUSH_DELAY);
+            digitalWrite(PIN_VIBRATOR_UP, LOW);
+            COROUTINE_DELAY(VIBRATOR_PUSH_DELAY);
+          }
+          g_wifi.Resume();
           DEBUG_ONLY(Serial.println(F("[VIBRATOR]\tTurned UP")));
         }
       }
@@ -919,10 +931,14 @@ int Vibrator::runCoroutine()
         {
           //turn down:
           _currentState.mode--;
-          digitalWrite(PIN_VIBRATOR_DOWN, HIGH);
-          COROUTINE_DELAY(VIBRATOR_PUSH_DELAY);
-          digitalWrite(PIN_VIBRATOR_DOWN, LOW);
-          COROUTINE_DELAY(VIBRATOR_PUSH_DELAY);
+          g_wifi.Suspend();
+          {
+            digitalWrite(PIN_VIBRATOR_DOWN, HIGH);
+            COROUTINE_DELAY(VIBRATOR_PUSH_DELAY);
+            digitalWrite(PIN_VIBRATOR_DOWN, LOW);
+            COROUTINE_DELAY(VIBRATOR_PUSH_DELAY);
+          }
+          g_wifi.Resume();
           DEBUG_ONLY(Serial.println(F("[VIBRATOR]\tTurned DOWN")));
         }
       }
@@ -1498,7 +1514,7 @@ void Logic::log_session()
   static unsigned long lastTick = 0;
 
   auto now = millis();
-  if(_hasSession && (lastTick+1000 < now))
+  if(_hasSession && (lastTick+250 < now))
   {
     lastTick = now;
     g_wifi.LogSessionTick(
@@ -1770,23 +1786,6 @@ void profile(int storageID, ProfiledFunc profiledFunc)
 // WIFI control
 int WIFI::runCoroutine()
 {
-  auto checkTimeout = [&](){
-      if (ShouldConnect())
-      {
-        if(!IsConnected())
-        {
-          const auto now = millis();
-          if (now > GetWantsToBeOnlineStartTime()+(1000*15))
-          {
-            SetOnlineMode(false, false);
-          }
-        } else
-        {
-          _wantsToBeOnlineStartTime = millis();
-        }
-      }
-  };
-
   COROUTINE_LOOP()
   {
       if(!ShouldConnect())
@@ -1794,110 +1793,95 @@ int WIFI::runCoroutine()
         return 0;
       }
 
-      checkTimeout();
-
+      //Make sure we're always connected
       #if 1
       static uint64_t timeout = 1000;
       static auto status = wl_status_t::WL_DISCONNECTED;
-      while (status != WL_CONNECTED && status != WL_IDLE_STATUS)
       {
-        ProfileBlock(200, "Reconnection");
-        WiFi.setTimeout(timeout);
-        WiFi.begin(NOGASM_WIFI_SSID, NOGASM_WIFI_PASS);
+        while (status != WL_CONNECTED)
+        {
+          WiFi.setTimeout(timeout);
+          WiFi.begin(NOGASM_WIFI_SSID, NOGASM_WIFI_PASS);
 
-        static auto start = millis();
-        start = millis();
-        while (ShouldConnect() && WiFi.status() != WL_CONNECTED && millis()<(start+timeout))
-        {
-          COROUTINE_DELAY(15);
-        }
-        status = static_cast<wl_status_t>(WiFi.status());
-        if(status != WL_CONNECTED)
-        {
-          WiFi.end();
-          Serial.print("Wifi connection failed... error code: ");
-          Serial.print(status);
-          Serial.println(", retrying");
-          timeout += 1000;
-          COROUTINE_DELAY(1000*1);
-        }
-        else
-        {
-          Serial.println("Wifi connected!");
-          COROUTINE_DELAY(1000*1);
+          static auto start = millis();
+          start = millis();
+          while (ShouldConnect() && WiFi.status() != WL_CONNECTED && millis()<(start+timeout))
+          {
+            COROUTINE_DELAY(15);
+          }
+          status = static_cast<wl_status_t>(WiFi.status());
+          if(status != WL_CONNECTED)
+          {
+            WiFi.end();
+            Serial.print("Wifi connection failed... error code: ");
+            Serial.print(status);
+            Serial.println(", retrying");
+            timeout += 1000;
+            COROUTINE_DELAY(1000*1);
+          }
+          else
+          {
+            Serial.println("Wifi connected!");
+    
+            // print the SSID of the network you're attached to:
+            Serial.print("SSID: ");
+            Serial.println(WiFi.SSID());
+
+
+            // print your board's IP address:
+            IPAddress ip = WiFi.localIP();
+            Serial.print("IP Address: ");
+            Serial.println(ip);
+
+
+            // print the received signal strength:
+            long rssi = WiFi.RSSI();
+            Serial.print("signal strength (RSSI):");
+            Serial.print(rssi);
+            Serial.println(" dBm");
+            
+            COROUTINE_DELAY(1000*1);
+          }
         }
       }
     #endif
 
-    //refresh status, make sure we haven't disconnected...
-    static uint64_t lastTick = millis();
-    if (millis() > lastTick+1000)
-    {
-      lastTick = millis();
-      ProfileBlock(200, "Wifi Status");
-      status = static_cast<wl_status_t>(WiFi.status());
-      if(status != WL_CONNECTED && status != WL_IDLE_STATUS)
-      {
-        ProfileBlock(200, "Wifi End");
-        WiFi.end();
-        Serial.print("Lost wifi connection, status: ");
-        Serial.println(status);
-      }
-
-      auto& client = g_WifiWriter.GetClient();
-      _connected = !client.hasError() && client.connected();
-      if (!client.connected())
-      {
-        Serial.println("client disconnected");
-      }
-
-      if (client.hasError())
-      {
-        Serial.println("client has error");
-      }
-
-      if (!_connected)
-      {
-        Serial.println("server disconnected, reconnecting");
-        connect();
-      }
-    }
-
-    if (status == WL_CONNECTED && g_wifi.ShouldConnect())
+    status = static_cast<wl_status_t>(WiFi.status());
+    if (status == WL_CONNECTED)
     {
       if (_resetSession)
       {
-        static bool success;
-        success = internalRequestSession();
-        if (!success)
-        {
-          Serial.println("request failed");
-          COROUTINE_DELAY(1000 * 60);
-        }
-        else
-        {
-          while(ShouldConnect() && !g_WifiWriter.GetClient().available())
-          {
-            spareDebugPrintln("waiting for data to become available...");
-            COROUTINE_DELAY(10);
-          }
-          internalRequestSessionResponse();
-        }
-        COROUTINE_YIELD();
-      }
+        internalRequestSession();
 
-      {
-        while(ShouldConnect() && WiFi.status() == WL_CONNECTED && !_buffer.isEmpty())
+        //wait until we receive session packet (there are no other packets)
+        while(true)
         {
-          if (connect())
+          int packetSize = _udpclient.parsePacket();
+          if (packetSize>0 && _resetSession && _udpclient.remotePort()==51338)
           {
-            ProfileBlock(200, "Wifi send log");
-            internalSendLog(_buffer.shift());
+            _session = _udpclient.readString().c_str();
+            _resetSession = false;
+            break;
           }
-          checkTimeout();
           COROUTINE_YIELD();
         }
       }
+
+      //send log data:
+      while(!_buffer.isEmpty())
+      {
+        internalSendLog(_buffer.shift());
+        COROUTINE_YIELD();
+      }
+
+      int packetSize = _udpclient.parsePacket();
+      if (packetSize > 0)
+      {
+        _lastPing = millis();
+        _udpclient.flush();
+        COROUTINE_YIELD();
+      }
+      _connected = (_lastPing+5000) > millis();
     }
     
     COROUTINE_YIELD();
@@ -1912,6 +1896,8 @@ void WIFI::Setup()
   _selectedHost = std::clamp(EEPROM.get(EEPROM_SELECTEDHOST_ADDR, _selectedHost), int16_t(0), int16_t(std::size(NOGASM_LOGGER_HOST)));
   Serial.print("[STARTUP] SelectedHost=");
   Serial.println(_selectedHost); 
+
+  _udpclient.begin(51337);
 }
 
 void WIFI::Update()
@@ -1919,11 +1905,24 @@ void WIFI::Update()
 
 bool WIFI::internalRequestSession() 
 {
-#if 1
+  if (_udpclient.beginPacket(NOGASM_LOGGER_HOST[g_wifi.GetSelectedHost()], 51338) == 1)
+  {
+    _udpclient.write(1);
+    if (_udpclient.endPacket() != 1) {
+      Serial.println("packet failed to send");
+    }
+  } 
+  else
+  {
+    Serial.println("error: could not resolve udp host/port");
+  }
+
+
+#if 0
   //_client.stop();
   //_client.flush();
   Serial.println("requesting session");
-  auto& client = g_WifiWriter.GetClient();
+  auto& client = g_wifiwriter.GetClient();
   if (connect())
   {
     client.println("GET /session HTTP/1.1");
@@ -1945,8 +1944,9 @@ bool WIFI::internalRequestSession()
 
 void WIFI::internalRequestSessionResponse()
 {
+  #if 0
     Serial.println("reading answer");
-    auto& client = g_WifiWriter.GetClient();
+    auto& client = g_wifiwriter.GetClient();
     auto answer =  client.readString();
     std::string s{answer.c_str()};
     if (s.find("200 OK")>=0)
@@ -1964,51 +1964,47 @@ void WIFI::internalRequestSessionResponse()
     {
       _resetSession = true;
     }
+    #endif
 }
 
 void WIFI::internalSendLog(const internalLog& logData)
 {
-  auto& client = g_WifiWriter.GetClient();
+  ProfileBlock(50, "Wifi sendlog");
   
+  static arduino::String body = [](){
+    arduino::String staticString;
+    staticString.reserve(2000);
+    return staticString;
+  }();
 
-  arduino::String s;
+  static arduino::String s = [](){
+    arduino::String staticString;
+    staticString.reserve(2000);
+    return staticString;
+  }();
 
-  //body:
-  s+="{"
-                    "\"time\": "; s+=static_cast<unsigned long>(logData.time-_sessionStartTime); s+=","
-                    "\"param1\": "; s+=logData.data.param1; s+=","
-                    "\"param2\": "; s+=logData.data.param2; s+=","
-                    "\"param3\": "; s+=logData.data.param3; s+=","
-                    "\"param4\": "; s+=logData.data.param4; s+=","
-                    "\"param5\": "; s+=logData.data.param5; s+=","
-                    "\"param6\": "; s+=logData.data.param6;             
-  s+="}";
-  uint16_t c=s.length();
+  body="{"
+                    "\"session\": \""; body += _session.c_str(); body += "\","
+                    "\"time\": "; body+=static_cast<unsigned long>(logData.time-_sessionStartTime); body+=","
+                    "\"param1\": "; body+=logData.data.param1; body+=","
+                    "\"param2\": "; body+=logData.data.param2; body+=","
+                    "\"param3\": "; body+=logData.data.param3; body+=","
+                    "\"param4\": "; body+=logData.data.param4; body+=","
+                    "\"param5\": "; body+=logData.data.param5; body+=","
+                    "\"param6\": "; body+=logData.data.param6;             
+  body+="}";
 
-  client.print("POST /session/"); client.print(_session.c_str()); client.println("/log HTTP/1.1");
-  client.print("Host: "); client.println(NOGASM_LOGGER_HOST[g_wifi.GetSelectedHost()]);
-  client.println("User-Agent: ArduinoWiFi/1.1");
-  client.println("Connection: keep-alive");
-  client.println("Keep-Alive: timeout=5, max=5000");
-  //client.println("Connection: close");
-  client.print("Content-Length: "); client.println(c);
-  client.println();
-  client.println(s);
-  //client.flush(); //don't care about any previous responses
-  /*
-  if (c>500)
+  if (_udpclient.beginPacket(NOGASM_LOGGER_HOST[g_wifi.GetSelectedHost()], 51337) == 1)
   {
-    Serial.println("[ERROR] c>500");
-    while(true) { delay(1); }
-  }
-
-  for(int i=0; i < 500-c; i++)
+    _udpclient.write(body.c_str());
+    if (_udpclient.endPacket() != 1) {
+      Serial.println("packet failed to send");
+    }
+  } 
+  else
   {
-    client.print(" ");
+    Serial.println("error: could not resolve udp host/port");
   }
-  */
-
-  //Serial.println(&lbuffer[0]);
 }
 
 void WIFI::LogEndSession() 
@@ -2052,78 +2048,36 @@ bool WIFI::connect()
     return false;
   }
 
-  auto& client = g_WifiWriter.GetClient();
+  return true;
+#if 0
+  auto& client = g_wifiwriter.GetClient();
   if (!_connected)
   {
     client.stop();
     client.clearError();
     client.clear();
+    client.flush();
+    delay(100);
 
-    // print the SSID of the network you're attached to:
-    Serial.print("SSID: ");
-    Serial.println(WiFi.SSID());
-
-
-    // print your board's IP address:
-
-    IPAddress ip = WiFi.localIP();
-    Serial.print("IP Address: ");
-    Serial.println(ip);
-
-
-    // print the received signal strength:
-
-    long rssi = WiFi.RSSI();
-    Serial.print("signal strength (RSSI):");
-    Serial.print(rssi);
-    Serial.println(" dBm");
-
-    _connected = client.connect(NOGASM_LOGGER_HOST[g_wifi.GetSelectedHost()], NOGASM_LOGGER_PORT)==1;
-    if (_connected)
+    _connected = client.connect(NOGASM_LOGGER_HOST[g_wifi.GetSelectedHost()], NOGASM_LOGGER_PORT);
+    if (_connected==1)
     {
       //always:
       EEPROM.put(EEPROM_SELECTEDHOST_ADDR, _selectedHost);
       Serial.print("Set selected host to ");
       Serial.println(_selectedHost);
     }
+    else 
+    {
+      Serial.print("wifi-client failed, no error code, wifi-status: ");
+      Serial.println(WiFi.status());
+    }
     return _connected;
   }
   return true;
+#endif
 }
 
-/////////////////////////////////////////////////////
-// WIFI writer
-int WIFIWriter::runCoroutine()
-{
-  COROUTINE_LOOP()
-  {
-    static auto start = 0ll;
-    start = millis();
-
-    if (_client.HasDataToWriteOut())
-    {
-      while(millis() < start+33)
-      {
-        while(_client.available())
-        {
-          _client.read();
-        }
-        auto wroteBytes = _client.flushOut();
-        if (wroteBytes==0)
-        {
-            COROUTINE_DELAY(50);
-            break;
-        }
-      }
-    }
-    else
-    {
-      COROUTINE_DELAY(200);
-    }
-    
-    COROUTINE_YIELD();
-  }
-}
 //=======Setup=======================================
 void setup() 
 {
@@ -2137,7 +2091,6 @@ void setup()
   g_leds.Setup();  delay(100); DEBUG_ONLY(Serial.println(F("LEDS up"))); Serial.flush();
   g_vibrator.Setup();  delay(100); DEBUG_ONLY(Serial.println(F("Vibrator up"))); Serial.flush();
   g_wifi.Setup();  delay(100); DEBUG_ONLY(Serial.println(F("Wifi up"))); Serial.flush();
-  g_WifiWriter.Setup();  delay(100); DEBUG_ONLY(Serial.println(F("WifiWriter up"))); Serial.flush();
   #endif
   Serial.println(F("Started up"));
 }
@@ -2154,15 +2107,13 @@ void loop()
   profile(3, [](){ g_leds.runCoroutine(); });
   profile(4, [](){ g_vibrator.runCoroutine(); });
   profile(5, [](){ g_wifi.runCoroutine(); });
-  profile(7, [](){ g_WifiWriter.runCoroutine(); });
 #else
-  g_sensor.runCoroutine(); 
-  g_logic.runCoroutine();
-  g_lcd.runCoroutine();
-  g_leds.runCoroutine();
-  g_vibrator.runCoroutine();
-  g_wifi.runCoroutine();
-  g_WifiWriter.runCoroutine();
+  if (!g_sensor.IsSuspended()) g_sensor.runCoroutine(); 
+  if (!g_logic.IsSuspended()) g_logic.runCoroutine();
+  if (!g_lcd.IsSuspended()) g_lcd.runCoroutine();
+  if (!g_leds.IsSuspended()) g_leds.runCoroutine();
+  if (!g_vibrator.IsSuspended()) g_vibrator.runCoroutine();
+  if (!g_wifi.IsSuspended()) g_wifi.runCoroutine();
 #endif
 #endif
 }
