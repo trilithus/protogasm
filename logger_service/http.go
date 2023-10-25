@@ -40,7 +40,7 @@ func httpmain() {
 	}
 
 	// Start the server.
-	fmt.Println("Server is listening on port 51337...")
+	fmt.Println("HTTP-Server is listening on port 51337...")
 	if err := server.ListenAndServe(); err != nil {
 		log.Fatal(err)
 	}

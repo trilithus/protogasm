@@ -15,6 +15,7 @@ func udpmain() {
 		log.Fatal(err)
 	}
 	defer pc.Close()
+	fmt.Println("udp-server running on 51337")
 
 	for {
 		buf := make([]byte, 4096)

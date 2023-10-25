@@ -4,7 +4,7 @@
 //#pragma GCC optimize ("Od")
 
 #define DEBUG_LOG_ENABLED 1
-#define PROFILING_ENABLED 1
+#define PROFILING_ENABLED 0
 
 //defines NOGASM_WIFI_SSID & NOGASM_WIFI_PASS:
 #include "nogasm_wifi.h"
@@ -472,7 +472,7 @@ class WIFI : public CustomCoroutine
     bool _wantsToBeOnline = false;
   private:
     bool connect();
-    bool internalRequestSession();
+    void internalRequestSession();
     void internalRequestSessionResponse();
     void internalSendLog(const internalLog& logData);
   public:
@@ -1903,7 +1903,7 @@ void WIFI::Setup()
 void WIFI::Update()
 {}
 
-bool WIFI::internalRequestSession() 
+void WIFI::internalRequestSession() 
 {
   if (_udpclient.beginPacket(NOGASM_LOGGER_HOST[g_wifi.GetSelectedHost()], 51338) == 1)
   {
@@ -1914,7 +1914,10 @@ bool WIFI::internalRequestSession()
   } 
   else
   {
-    Serial.println("error: could not resolve udp host/port");
+    Serial.print("error: could not resolve udp host/port");
+    Serial.print(NOGASM_LOGGER_HOST[g_wifi.GetSelectedHost()]);
+    Serial.print(":");
+    Serial.println(51338);
   }
 
 
@@ -1939,7 +1942,6 @@ bool WIFI::internalRequestSession()
     Serial.println("connection failed");
   }
 #endif
-  return false;
 };
 
 void WIFI::internalRequestSessionResponse()

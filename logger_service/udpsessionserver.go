@@ -15,6 +15,7 @@ func udpsessionservermain() {
 		log.Fatal(err)
 	}
 	defer pc.Close()
+	fmt.Println("udp-session-server running on 51338")
 
 	for {
 		buf := make([]byte, 4096)

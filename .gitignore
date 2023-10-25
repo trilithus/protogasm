@@ -1,5 +1,7 @@
 nogasm_wifi.h
 */.vscode/*
+*.exe
 case/stl/*.pdf
 build
 dataprocessing/temp/*
+logger_service/data/
