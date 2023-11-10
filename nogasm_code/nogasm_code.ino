@@ -524,7 +524,7 @@ void getMenuItemLabels(MenuItemsEnum pValue, String& output)
     case MenuItemsEnum::automatic_input_min: output = F("Start treshold: "); return;
     case MenuItemsEnum::automatic_input_max: output = F("End treshold: "); return;
     case MenuItemsEnum::automatic_back: output = F("[ Back ]"); return;
-    case MenuItemsEnum::select_host: output = "Host: "; output += NOGASM_LOGGER_HOST[g_wifi.GetSelectedHost()]; return;
+    case MenuItemsEnum::select_host: output = "Host: "; output += NOGASM_LOGGER_HOST[g_wifi.GetSelectedHost()].toString(); return;
     case MenuItemsEnum::toggle_online: output = (g_wifi.GetOnlineMode() ? F("Go offline") : F("Go online")); return;
     case MenuItemsEnum::resetSession: output = F("Reset Session"); return;
     case MenuItemsEnum::LAST: output = F("!ERROR!"); return;
@@ -1788,62 +1788,63 @@ int WIFI::runCoroutine()
 {
   COROUTINE_LOOP()
   {
-      if(!ShouldConnect())
-      {
-        return 0;
-      }
+    Update();
 
-      //Make sure we're always connected
-      #if 1
-      static uint64_t timeout = 1000;
-      static auto status = wl_status_t::WL_DISCONNECTED;
+    if(!ShouldConnect())
+    {
+      return 0;
+    }
+
+    //Make sure we're always connected to the WIFI AP
+    #if 1
+    static uint64_t timeout = 1000;
+    static auto status = wl_status_t::WL_DISCONNECTED;
+    {
+      while (status != WL_CONNECTED)
       {
-        while (status != WL_CONNECTED)
+        WiFi.setTimeout(timeout);
+        WiFi.begin(NOGASM_WIFI_SSID, NOGASM_WIFI_PASS);
+
+        static auto start = millis();
+        start = millis();
+        while (ShouldConnect() && WiFi.status() != WL_CONNECTED && millis()<(start+timeout))
         {
-          WiFi.setTimeout(timeout);
-          WiFi.begin(NOGASM_WIFI_SSID, NOGASM_WIFI_PASS);
-
-          static auto start = millis();
-          start = millis();
-          while (ShouldConnect() && WiFi.status() != WL_CONNECTED && millis()<(start+timeout))
-          {
-            COROUTINE_DELAY(15);
-          }
-          status = static_cast<wl_status_t>(WiFi.status());
-          if(status != WL_CONNECTED)
-          {
-            WiFi.end();
-            Serial.print("Wifi connection failed... error code: ");
-            Serial.print(status);
-            Serial.println(", retrying");
-            timeout += 1000;
-            COROUTINE_DELAY(1000*1);
-          }
-          else
-          {
-            Serial.println("Wifi connected!");
-    
-            // print the SSID of the network you're attached to:
-            Serial.print("SSID: ");
-            Serial.println(WiFi.SSID());
+          COROUTINE_DELAY(15);
+        }
+        status = static_cast<wl_status_t>(WiFi.status());
+        if(status != WL_CONNECTED)
+        {
+          WiFi.end();
+          Serial.print("Wifi connection failed... error code: ");
+          Serial.print(status);
+          Serial.println(", retrying");
+          timeout += 1000;
+          COROUTINE_DELAY(1000*1);
+        }
+        else
+        {
+          Serial.println("Wifi connected!");
+          // print the SSID of the network you're attached to:
+          Serial.print("SSID: ");
+          Serial.println(WiFi.SSID());
 
 
-            // print your board's IP address:
-            IPAddress ip = WiFi.localIP();
-            Serial.print("IP Address: ");
-            Serial.println(ip);
+          // print your board's IP address:
+          IPAddress ip = WiFi.localIP();
+          Serial.print("IP Address: ");
+          Serial.println(ip);
 
 
-            // print the received signal strength:
-            long rssi = WiFi.RSSI();
-            Serial.print("signal strength (RSSI):");
-            Serial.print(rssi);
-            Serial.println(" dBm");
-            
-            COROUTINE_DELAY(1000*1);
-          }
+          // print the received signal strength:
+          long rssi = WiFi.RSSI();
+          Serial.print("signal strength (RSSI):");
+          Serial.print(rssi);
+          Serial.println(" dBm");
+          
+          COROUTINE_DELAY(1000*1);
         }
       }
+    }
     #endif
 
     status = static_cast<wl_status_t>(WiFi.status());
@@ -1854,34 +1855,41 @@ int WIFI::runCoroutine()
         internalRequestSession();
 
         //wait until we receive session packet (there are no other packets)
-        while(true)
+        static auto beginTime = millis();
+        beginTime = millis();
+        
+        _connected = false;
+        while(millis() <= beginTime+(1*1000))
         {
           int packetSize = _udpclient.parsePacket();
-          if (packetSize>0 && _resetSession && _udpclient.remotePort()==51338)
+          if (packetSize>0 && _resetSession && _udpclient.remotePort()==NOGASM_LOGGER_PORT)
           {
             _session = _udpclient.readString().c_str();
             _resetSession = false;
+            _connected = true;
             break;
           }
           COROUTINE_YIELD();
         }
       }
-
-      //send log data:
-      while(!_buffer.isEmpty())
+      else
       {
-        internalSendLog(_buffer.shift());
-        COROUTINE_YIELD();
-      }
+        //send log data:
+        while(!_buffer.isEmpty())
+        {
+          internalSendLog(_buffer.shift());
+          COROUTINE_YIELD();
+        }
 
-      int packetSize = _udpclient.parsePacket();
-      if (packetSize > 0)
-      {
-        _lastPing = millis();
-        _udpclient.flush();
-        COROUTINE_YIELD();
+        int packetSize = _udpclient.parsePacket();
+        if (packetSize > 0)
+        {
+          _lastPing = millis();
+          _udpclient.flush();
+          COROUTINE_YIELD();
+        }
+        _connected = (_lastPing+5000) > millis();
       }
-      _connected = (_lastPing+5000) > millis();
     }
     
     COROUTINE_YIELD();
@@ -1897,15 +1905,22 @@ void WIFI::Setup()
   Serial.print("[STARTUP] SelectedHost=");
   Serial.println(_selectedHost); 
 
-  _udpclient.begin(51337);
+  _udpclient.begin(NOGASM_SESSION_PORT);
 }
 
 void WIFI::Update()
-{}
+{
+  static auto lastSelectedHost = _selectedHost;
+  if (lastSelectedHost != _selectedHost)
+  {
+    EEPROM.put(EEPROM_SELECTEDHOST_ADDR, _selectedHost);
+    lastSelectedHost = _selectedHost;
+  }
+}
 
 void WIFI::internalRequestSession() 
 {
-  if (_udpclient.beginPacket(NOGASM_LOGGER_HOST[g_wifi.GetSelectedHost()], 51338) == 1)
+  if (_udpclient.beginPacket(NOGASM_LOGGER_HOST[g_wifi.GetSelectedHost()], NOGASM_LOGGER_PORT) == 1)
   {
     _udpclient.write(1);
     if (_udpclient.endPacket() != 1) {
@@ -1914,10 +1929,19 @@ void WIFI::internalRequestSession()
   } 
   else
   {
-    Serial.print("error: could not resolve udp host/port");
-    Serial.print(NOGASM_LOGGER_HOST[g_wifi.GetSelectedHost()]);
+    Serial.print("error: could not resolve udp host/port ");
+    Serial.print(NOGASM_LOGGER_HOST[g_wifi.GetSelectedHost()].toString());
     Serial.print(":");
-    Serial.println(51338);
+    Serial.print(NOGASM_LOGGER_PORT);
+    Serial.print(", wifi code: ");
+    Serial.println(WiFi.status());
+    Serial.println(_udpclient.available() ? "udpclient is available" : "udpclient is unavailable");
+    Serial.println(_udpclient.availableForWrite() ? "udpclient is write-available" : "udpclient is not write available");
+    Serial.print("write error: "); Serial.println(_udpclient.getWriteError());
+    _udpclient.flush();
+    _udpclient.clearWriteError();
+    _udpclient.stop();
+    Serial.println(_udpclient.begin(51337)==1 ? "UDPClient reset" : "UDPClient Reset Failed!!");
   }
 
 
@@ -1929,7 +1953,7 @@ void WIFI::internalRequestSession()
   if (connect())
   {
     client.println("GET /session HTTP/1.1");
-    client.print("Host: "); client.println(NOGASM_LOGGER_HOST[g_wifi.GetSelectedHost()]);
+    client.print("Host: "); client.println(NOGASM_LOGGER_HOST[g_wifi.GetSelectedHost()].toString());
     client.println("User-Agent: ArduinoWiFi/1.1");
     client.println("Connection: close");
     client.println();
@@ -1996,7 +2020,7 @@ void WIFI::internalSendLog(const internalLog& logData)
                     "\"param6\": "; body+=logData.data.param6;             
   body+="}";
 
-  if (_udpclient.beginPacket(NOGASM_LOGGER_HOST[g_wifi.GetSelectedHost()], 51337) == 1)
+  if (_udpclient.beginPacket(NOGASM_LOGGER_HOST[g_wifi.GetSelectedHost()], NOGASM_SESSION_PORT) == 1)
   {
     _udpclient.write(body.c_str());
     if (_udpclient.endPacket() != 1) {
@@ -2005,7 +2029,19 @@ void WIFI::internalSendLog(const internalLog& logData)
   } 
   else
   {
-    Serial.println("error: could not resolve udp host/port");
+    Serial.print("error: could not resolve udp host/port ");
+    Serial.print(NOGASM_LOGGER_HOST[g_wifi.GetSelectedHost()].toString());
+    Serial.print(":");
+    Serial.print(NOGASM_LOGGER_PORT);
+    Serial.print(", wifi code: ");
+    Serial.println(WiFi.status());
+    Serial.println(_udpclient.available() ? "udpclient is available" : "udpclient is unavailable");
+    Serial.println(_udpclient.availableForWrite() ? "udpclient is write-available" : "udpclient is not write available");
+    Serial.print("write error: "); Serial.println(_udpclient.getWriteError());
+    _udpclient.flush();
+    _udpclient.clearWriteError();
+    _udpclient.stop();
+    Serial.println(_udpclient.begin(51337)==1 ? "UDPClient reset" : "UDPClient Reset Failed!!");
   }
 }
 
@@ -2051,33 +2087,6 @@ bool WIFI::connect()
   }
 
   return true;
-#if 0
-  auto& client = g_wifiwriter.GetClient();
-  if (!_connected)
-  {
-    client.stop();
-    client.clearError();
-    client.clear();
-    client.flush();
-    delay(100);
-
-    _connected = client.connect(NOGASM_LOGGER_HOST[g_wifi.GetSelectedHost()], NOGASM_LOGGER_PORT);
-    if (_connected==1)
-    {
-      //always:
-      EEPROM.put(EEPROM_SELECTEDHOST_ADDR, _selectedHost);
-      Serial.print("Set selected host to ");
-      Serial.println(_selectedHost);
-    }
-    else 
-    {
-      Serial.print("wifi-client failed, no error code, wifi-status: ");
-      Serial.println(WiFi.status());
-    }
-    return _connected;
-  }
-  return true;
-#endif
 }
 
 //=======Setup=======================================
