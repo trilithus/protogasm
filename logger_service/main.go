@@ -13,6 +13,6 @@ func main() {
 	go http.ListenAndServe("0.0.0.0:6060", nil)
 
 	for {
-		time.Sleep(1000)
+		time.Sleep(time.Millisecond * 1000)
 	}
 }
