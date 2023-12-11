@@ -7,7 +7,6 @@ import (
 	"log"
 	"net/http"
 	"os"
-	"strings"
 
 	"github.com/google/uuid"
 	"github.com/gorilla/mux"
@@ -63,12 +62,12 @@ func putSessionLog(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	for _, a := range os.Args {
-		if strings.Contains(a, "--debug") {
-			log.Println(string(body))
-			break
-		}
-	}
+	//for _, a := range os.Args {
+	//	if strings.Contains(a, "--debug") {
+	log.Println(string(body))
+	//			break
+	//}
+	//}
 
 	filePath := "./data/" + uuid + ".txt"
 
