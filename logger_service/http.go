@@ -88,7 +88,7 @@ func putSessionLog(w http.ResponseWriter, r *http.Request) {
 	// Perform any necessary processing on the request body here.
 	d := map[string]int64{}
 	if err := json.Unmarshal(body, &d); err == nil {
-		file.WriteString(fmt.Sprintf("%d,%d,%d,%d,%d,%d,%d\r\n", d["time"],
+		file.WriteString(fmt.Sprintf("%v,%v,%v,%v,%v,%v,%v\r\n", d["time"],
 			d["param1"], d["param2"], d["param3"],
 			d["param4"], d["param5"], d["param6"]))
 	} else {
