@@ -12,12 +12,6 @@ import (
 	"github.com/gorilla/mux"
 )
 
-type LogStruct struct {
-	Logs []struct {
-		Fields []string `json:"fields"`
-	} `json:"logs"`
-}
-
 func httpmain() {
 	if info, err := os.Stat("data"); err != nil || !info.IsDir() {
 		os.Mkdir("data", os.ModePerm)
@@ -86,7 +80,7 @@ func putSessionLog(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Perform any necessary processing on the request body here.
-	d := map[string]int64{}
+	d := map[string]any{}
 	if err := json.Unmarshal(body, &d); err == nil {
 		file.WriteString(fmt.Sprintf("%v,%v,%v,%v,%v,%v,%v\r\n", d["time"],
 			d["param1"], d["param2"], d["param3"],
