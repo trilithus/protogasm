@@ -52,11 +52,14 @@ func handleUDPLog(pc net.PacketConn, addr net.Addr, buf []byte) {
 	defer file.Close()
 
 	if fileIsNew {
-		file.WriteString("time,motorspeed,current_pressure,avg_pressure,delta_pressure,limit,cooldown\r\n")
+		file.WriteString("time_s,motorspeed,current_pressure,avg_pressure,delta_pressure,limit,cooldown\r\n")
 	}
 
+	timestampMS := d["time"].(float64)
+	timestampS := timestampMS / 1000.0
+
 	// Perform any necessary processing on the request body here.
-	file.WriteString(fmt.Sprintf("%v,%v,%v,%v,%v,%v,%v\r\n", d["time"],
+	file.WriteString(fmt.Sprintf("%5.3f,%10f,%v,%v,%v,%v,%v,%v\r\n", timestampS, timestampMS,
 		d["param1"], d["param2"], d["param3"],
 		d["param4"], d["param5"], d["param6"]))
 }
