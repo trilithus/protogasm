@@ -56,7 +56,7 @@ func handleUDPLog(pc net.PacketConn, addr net.Addr, buf []byte) {
 	}
 
 	// Perform any necessary processing on the request body here.
-	file.WriteString(fmt.Sprintf("%d,%d,%d,%d,%d,%d,%d\r\n", d["time"],
+	file.WriteString(fmt.Sprintf("%v,%v,%v,%v,%v,%v,%v\r\n", d["time"],
 		d["param1"], d["param2"], d["param3"],
 		d["param4"], d["param5"], d["param6"]))
 }
