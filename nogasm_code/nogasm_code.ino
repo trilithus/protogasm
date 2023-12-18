@@ -649,14 +649,6 @@ void LCD::setLCDFunc(T func, I arg, Iremainder... args)
 
 void LCD::lcdfunc_renderMenu()
 {
-#if 0
-  u8g2.setFont(font_13pt);
-  u8g2.setCursor(0, 20);
-
-  static String text;
-  text = g_MenuItemLabels[static_cast<uint8_t>(g_logic.getMenuItem())];
-  u8g2.print(text);
-#else
   u8g2.setFont(font_13pt);
   
   uint8_t left = 2;
@@ -701,7 +693,6 @@ void LCD::lcdfunc_renderMenu()
     u8g2.drawLine(left, bottom+2, right, bottom+2);
     u8g2.drawLine(right, bottom+2, right, u8g2.getDisplayHeight());
   }
-#endif
 }
 
 //static auto lastPressureChange = millis();
@@ -1088,67 +1079,6 @@ void Sensor::Setup()
         }
       }
     }
-#if 0
-    int Sensor::runCoroutine() 
-    {
-      static auto s_lastTime = micros();
-      static uint32_t g_tick = 0;
-      static int32_t s_tickaccumulator = 0;
-      static uint32_t s_lastTick = 0;
-
-      COROUTINE_LOOP()
-      {
-        static auto time = micros();
-        static auto timeMillis = millis();
-        static auto elapsed = 0ul;
-        time = micros();
-        timeMillis = micros();
-        elapsed = [&]()
-        {
-          if (time >= s_lastTime)
-          {
-            return time - s_lastTime;
-          }
-          else
-          {
-            return (ULONG_MAX - s_lastTime) + time;
-          }
-        }();
-        s_lastTime = time;
-
-        s_tickaccumulator += elapsed;
-        if (s_tickaccumulator >= 1000000 / 60)
-        {
-          s_tickaccumulator -= 1000000 / 60;
-          g_tick++;
-        }
-
-        if (s_lastTick != g_tick)
-        {
-          s_lastTick = g_tick;
-          if (g_tick % RA_TICK_PERIOD == 0)
-          {
-            raPressure.addValue(g_pressure);
-            avgPressure = raPressure.getAverage();
-          }
-
-          static int l_pressure = 0;
-          l_pressure = 0;
-          static uint8_t i = 0;
-          for (i = OVERSAMPLE; i; --i)
-          {
-            l_pressure += analogRead(BUTTPIN);
-            if (i)
-            {           // Don't delay after the last sample
-              COROUTINE_DELAY(1); // Spread samples out a little
-            }
-          }
-          g_pressure = l_pressure;
-        }
-        COROUTINE_YIELD();
-      }
-    }
-#endif
 /////////////////////////////////////////////////////
 // Logic
 int Logic::sampleTick = 0;
@@ -1640,44 +1570,6 @@ MachineStates Logic::change_state(MachineStates newState)
     _state = newState;
     return _state;
   }
-
-  #if 0
-  if(btnState == BTN_NONE){
-    return state;
-  }
-  if(btnState == BTN_V_LONG){
-    //Turn the device off until woken up by the button
-    Serial.println(F("power off"));
-    fill_gradient_RGB(leds,0,CRGB::Black,NUM_LEDS-1,CRGB::Black);//Turn off LEDS
-    FastLED.show();
-    while(!digitalRead(ENC_SW))delay(1);
-    return MachineStates::manual_motor_control;
-  }
-  else if(btnState == BTN_SHORT){
-    switch(state){
-      case MachineStates::manual_motor_control:
-        myEnc->write(sensitivity);//Whenever going into auto mode, keep the last sensitivity
-        g_motSpeed = 0; //Also reset the motor speed to 0
-        return MachineStates::manual_edge_control;
-      case MachineStates::manual_edge_control:
-        myEnc->write(0);//Whenever going into manual mode, set the speed to 0.
-        g_motSpeed = 0;
-        EEPROM.update(EEPROM_SENSITIVITY_ADDR, sensitivity);
-        return MachineStates::manual_motor_control;
-    }
-  }
-  else if(btnState == BTN_LONG){
-    switch (state) {
-      case MachineStates::manual_motor_control:
-        myEnc->write(map(g_MaxSpeed, 0, 255, 0, 4 * (NUM_LEDS))); //start at saved value
-        return MachineStates::manual_edge_control;//OPT_SPEED;
-      case MachineStates::manual_edge_control:
-        myEnc->write(map(g_MaxSpeed, 0, 255, 0, 4 * (NUM_LEDS))); //start at saved value
-        return MachineStates::manual_motor_control;//OPT_SPEED;
-    }
-  }
-  else return MachineStates::manual_motor_control;
-  #endif
 }
 
 //=======LED Drawing Functions=================
@@ -1943,54 +1835,10 @@ void WIFI::internalRequestSession()
     _udpclient.stop();
     Serial.println(_udpclient.begin(51337)==1 ? "UDPClient reset" : "UDPClient Reset Failed!!");
   }
-
-
-#if 0
-  //_client.stop();
-  //_client.flush();
-  Serial.println("requesting session");
-  auto& client = g_wifiwriter.GetClient();
-  if (connect())
-  {
-    client.println("GET /session HTTP/1.1");
-    client.print("Host: "); client.println(NOGASM_LOGGER_HOST[g_wifi.GetSelectedHost()].toString());
-    client.println("User-Agent: ArduinoWiFi/1.1");
-    client.println("Connection: close");
-    client.println();
-    client.flushOut(-1);
-    Serial.println("session requested, awaiting answer");
-    return true;
-  }
-  else
-  {
-    Serial.println("connection failed");
-  }
-#endif
 };
 
 void WIFI::internalRequestSessionResponse()
 {
-  #if 0
-    Serial.println("reading answer");
-    auto& client = g_wifiwriter.GetClient();
-    auto answer =  client.readString();
-    std::string s{answer.c_str()};
-    if (s.find("200 OK")>=0)
-    {
-      Serial.println("http answer");
-      s.erase(0, s.find_last_of("\n\n")+2);
-      _session = s.c_str();
-      _sessionStartTime = millis();
-      Serial.println(_session.c_str());
-      _resetSession = false;
-      client.stop();
-      _connected = false;
-    }
-    else
-    {
-      _resetSession = true;
-    }
-    #endif
 }
 
 void WIFI::internalSendLog(const internalLog& logData)
