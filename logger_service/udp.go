@@ -37,7 +37,7 @@ func handleUDPLog(pc net.PacketConn, addr net.Addr, buf []byte) {
 		return
 	}
 
-	logchannel := d["channel"].(uint8)
+	logchannel := uint8(d["channel"].(float64))
 	uuid := d["session"].(string)
 	filePath := fmt.Sprintf("./data/%s.%d.txt", uuid, logchannel)
 
