@@ -37,8 +37,9 @@ func handleUDPLog(pc net.PacketConn, addr net.Addr, buf []byte) {
 		return
 	}
 
+	logchannel := d["channel"].(uint8)
 	uuid := d["session"].(string)
-	filePath := "./data/" + uuid + ".txt"
+	filePath := fmt.Sprintf("./data/%s.%d.txt", uuid, logchannel)
 
 	fileIsNew := false
 	if info, err := os.Stat(filePath); err != nil || info.IsDir() {
@@ -52,7 +53,16 @@ func handleUDPLog(pc net.PacketConn, addr net.Addr, buf []byte) {
 	defer file.Close()
 
 	if fileIsNew {
-		file.WriteString("time_s,motorspeed,current_pressure,avg_pressure,delta_pressure,limit,cooldown,var,var_target\r\n")
+		switch logchannel {
+		case 0:
+			file.WriteString("time_s,motorspeed,current_pressure,avg_pressure,delta_pressure,limit,cooldown,var,var_target\r\n")
+		case 1:
+			file.WriteString("time_s,enabled,level,delay\r\n")
+		case 2:
+			file.WriteString("time_s,edgecount\r\n")
+		default:
+			file.WriteString("time_s,param1,param2,param3,param4,param5,param6,param7,param8\r\n")
+		}
 	}
 
 	timestampMS := d["time"].(float64)
