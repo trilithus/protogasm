@@ -68,9 +68,25 @@ func handleUDPLog(pc net.PacketConn, addr net.Addr, buf []byte) {
 	timestampMS := d["time"].(float64)
 	timestampS := timestampMS / 1000.0
 
+	switch logchannel {
+	case 0:
+		file.WriteString(fmt.Sprintf("%5.3f,%v,%v,%v,%v,%v,%v,%v,%v\r\n", timestampS,
+			d["param1"], d["param2"], d["param3"],
+			d["param4"], d["param5"], d["param6"],
+			d["param7"], d["param8"]))
+	case 1:
+		file.WriteString(fmt.Sprintf("%5.3f,%v,%v,%v\r\n", timestampS,
+			d["param1"], d["param2"], d["param3"]))
+	case 2:
+		file.WriteString(fmt.Sprintf("%5.3f,%v\r\n", timestampS,
+			d["param1"]))
+	default:
+		file.WriteString(fmt.Sprintf("%5.3f,%v,%v,%v,%v,%v,%v,%v,%v\r\n", timestampS,
+			d["param1"], d["param2"], d["param3"],
+			d["param4"], d["param5"], d["param6"],
+			d["param7"], d["param8"]))
+	}
+
 	// Perform any necessary processing on the request body here.
-	file.WriteString(fmt.Sprintf("%5.3f,%v,%v,%v,%v,%v,%v,%v,%v\r\n", timestampS,
-		d["param1"], d["param2"], d["param3"],
-		d["param4"], d["param5"], d["param6"],
-		d["param7"], d["param8"]))
+
 }
