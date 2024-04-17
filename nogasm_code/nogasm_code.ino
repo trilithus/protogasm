@@ -67,12 +67,15 @@ using namespace ace_routine;
 
 //Running pressure average array length and update frequency
 #define RA_HIST_SECONDS 15 //25
+#define RA_VARHIST_SECONDS 5
 #define RA_FREQUENCY 10
 #define RA_TICK_PERIOD (FREQUENCY / RA_FREQUENCY)
 
 MovingAveragePlus<uint16_t, uint32_t, RA_FREQUENCY*RA_HIST_SECONDS> g_raOverallPressure;
+MovingAveragePlus<float, float, RA_FREQUENCY*RA_VARHIST_SECONDS> g_raOverallPressureVariance;
 MovingAveragePlus<uint16_t, uint32_t, 8> g_raImmediatePressure;
-
+float g_PressureVariance = 0.0f;
+float g_PressureVarianceMaximum = 15.0f;
 //LCD
 #define U8X8_HAVE_HW_I2C
 #include <Arduino.h>
@@ -84,7 +87,10 @@ MovingAveragePlus<uint16_t, uint32_t, 8> g_raImmediatePressure;
 
 
 #if 1
+#define font_8pt  u8g2_font_5x8_tr
 #define font_13pt u8g2_font_6x13_tr
+#define font_15pt u8g2_font_9x15_tr
+#define font_18pt u8g2_font_9x18_tr
 #define font_24pt u8g2_font_logisoso24_tn//u8g2_font_inb24_mr 
 #else
 #define font_13pt u8g2_font_6x13_tr
@@ -142,6 +148,7 @@ enum class MachineStates
   manual_edge_control,
   auto_edge_control,
   read_variable,
+  stabilize,
 };
 
 
@@ -174,6 +181,15 @@ uint16_t edgeCount = 0;
 auto g_lastEdgeCountChange = 0;
 static uint32_t g_tick = 0;
 
+#define DEFAULT_COOLDOWN_s 45.0f
+#define DEFAULT_COOLDOWN_ADJUSTMENT_FASTER_s 3.0f
+#define DEFAULT_COOLDOWN_ADJUSTMENT_SLOWER_s 8.0f
+#define DEFAULT_EDGETIME_TARGET_s 27.0f
+#define DEFAULT_EDGETIME_TARGET_MIN_S 2.0f
+#define DEFAULT_EDGETIME_TARGET_MAX_s (DEFAULT_EDGETIME_TARGET_s+13.0f)
+#define DEFAULT_MIN_COOLDOWN_s 20.0f
+#define DEFAULT_MAX_COOLDOWN_s 45.0f
+
 //Menu Items:
 enum class MenuItemsEnum : uint8_t
 {
@@ -186,6 +202,15 @@ enum class MenuItemsEnum : uint8_t
   automatic_input_time,
   automatic_input_min,
   automatic_input_max,
+  automatic_input_stabilization_maximum,
+  automatic_input_edge_INITIALCOOLDOWN_s,
+  automatic_input_edge_COOLDOWN_ADJUSTMENT_FASTER_s,
+  automatic_input_edge_COOLDOWN_ADJUSTMENT_SLOWER_s,
+  automatic_input_edge_EDGETIME_TARGET_s,
+  automatic_input_edge_EDGETIME_TARGET_MIN_S,
+  automatic_input_edge_EDGETIME_TARGET_MAX_s,
+  automatic_input_edge_MIN_COOLDOWN_s,
+  automatic_input_edge_MAX_COOLDOWN_s,
   automatic_back,
   toggle_online,
   resetSession,
@@ -213,6 +238,15 @@ MenuItemsEnum g_automaticMenu[] {
   MenuItemsEnum::automatic_input_time,
   MenuItemsEnum::automatic_input_min,
   MenuItemsEnum::automatic_input_max,
+  MenuItemsEnum::automatic_input_stabilization_maximum,
+  MenuItemsEnum::automatic_input_edge_INITIALCOOLDOWN_s,
+  MenuItemsEnum::automatic_input_edge_COOLDOWN_ADJUSTMENT_FASTER_s,
+  MenuItemsEnum::automatic_input_edge_COOLDOWN_ADJUSTMENT_SLOWER_s,
+  MenuItemsEnum::automatic_input_edge_EDGETIME_TARGET_s,
+  MenuItemsEnum::automatic_input_edge_EDGETIME_TARGET_MIN_S,
+  MenuItemsEnum::automatic_input_edge_EDGETIME_TARGET_MAX_s,
+  MenuItemsEnum::automatic_input_edge_MIN_COOLDOWN_s,
+  MenuItemsEnum::automatic_input_edge_MAX_COOLDOWN_s,
   MenuItemsEnum::automatic_back,
   MenuItemsEnum::LAST,
 };
@@ -249,13 +283,23 @@ void spareDebugPrintln(const char* pStr)
 
 //=======EEPROM Addresses============================
 //128b available on teensy LC
-#define EEPROM_ONLINEMODE_ADDR   0*4
-#define EEPROM_MAX_SPEED_ADDR    1*4
-#define EEPROM_SENSITIVITY_ADDR  2*4
-#define AUTOEDGE_MIN_ADDR        3*4
-#define AUTOEDGE_MAX_ADDR        4*4
-#define AUTOEDGE_TIME_ADDR       5*4
-#define EEPROM_SELECTEDHOST_ADDR 6*4
+#define EEPROM_ONLINEMODE_ADDR                              0*4
+#define EEPROM_MAX_SPEED_ADDR                               1*4
+#define EEPROM_SENSITIVITY_ADDR                             2*4
+#define AUTOEDGE_MIN_ADDR                                   3*4
+#define AUTOEDGE_MAX_ADDR                                   4*4
+#define AUTOEDGE_TIME_ADDR                                  5*4
+#define EEPROM_SELECTEDHOST_ADDR                            6*4
+#define PRESSUREVARMAX_ADDR                                 7*4
+#define EEPROM_DEFAULT_COOLDOWN_s_ADDR                      8*4
+#define EEPROM_DEFAULT_COOLDOWN_ADJUSTMENT_FASTER_s_ADDR    9*4
+#define EEPROM_DEFAULT_COOLDOWN_ADJUSTMENT_SLOWER_s_ADDR   10*4
+#define EEPROM_DEFAULT_EDGETIME_TARGET_s_ADDR              11*4
+#define EEPROM_DEFAULT_EDGETIME_TARGET_MIN_S_ADDR          12*4
+#define EEPROM_DEFAULT_EDGETIME_TARGET_MAX_s_ADDR          13*4
+#define EEPROM_DEFAULT_MIN_COOLDOWN_s_ADDR                 14*4
+#define EEPROM_DEFAULT_MAX_COOLDOWN_s_ADDR                 15*4
+
 
 //#define RAMPSPEED_ADDR    4 //For now, ramp speed adjustments aren't implemented
 #if 1
@@ -265,18 +309,20 @@ private:
 public:
   void Suspend() { _suspendCount++; }
   void Resume() { _suspendCount--; }
-  bool IsSuspended() const { return _suspendCount!=0; }
+  virtual bool IsSuspended() const { return _suspendCount!=0; }
 };
 
 //=======Hardware Coroutines=========================
 class Logic : public CustomCoroutine
 {
+  using super = CustomCoroutine;
   protected:
     void run_menu();
     void run_read_variable();
     void run_automatic_edge_control();
     void run_edge_control();
     void run_manual_motor_control();
+    void run_stabilize();
     void update_current_status();
     void log_session();
     PhysBtnState check_button();
@@ -284,9 +330,12 @@ class Logic : public CustomCoroutine
     MachineStates change_state(MachineStates newState);
     void resetSession();
     void clearSession();
+    void SaveSettings();
   public:
     void Setup();
-    MachineStates getState() const { return _state; }
+    void PushState(MachineStates newState);
+    void PopState();
+    MachineStates getState() const { return *_state; }
     MenuItemsEnum getMenuItem() const { return *_currentMenuItem; }
     bool isMenuItemLast() const { return _currentMenuItemState.isLast; }
     bool isMenuItemFirst() const { return _currentMenuItemState.isFirst; }
@@ -304,20 +353,30 @@ class Logic : public CustomCoroutine
       bool isLast;
     } _currentMenuItemState;
 
-    MachineStates _state = MachineStates::UNDEFINED;
+    MachineStates _stateStack[8]{};
+    MachineStates* _state = &_stateStack[0];
     PhysBtnState _physBtnState = PhysBtnState::None;
     int32_t _menuKnobState = 0;
 
+    typedef void (*writeVariableCallback)(const int16_t* pWrittenVariable);
     int16_t* _readVariable = nullptr;
     int16_t _readVariableMin = 0;
     int16_t _readVariableMax = 1000;
+    writeVariableCallback _writeVariableCallback = nullptr;
 
     int16_t _automatic_edge_maxtarget = 0;
     int16_t _automatic_edge_mintarget = 0;
     int16_t _automatic_edge_time_minutes = 0;
     int16_t _autoEdgeTargetOffset = 0;
-
     unsigned long _autoTimeStart = 0;
+    int16_t _automatic_edge_INITIALCOOLDOWN_s = DEFAULT_COOLDOWN_s;
+    int16_t _automatic_edge_COOLDOWN_ADJUSTMENT_FASTER_s = DEFAULT_COOLDOWN_ADJUSTMENT_FASTER_s;
+    int16_t _automatic_edge_COOLDOWN_ADJUSTMENT_SLOWER_s = DEFAULT_COOLDOWN_ADJUSTMENT_SLOWER_s;
+    int16_t _automatic_edge_EDGETIME_TARGET_s = DEFAULT_EDGETIME_TARGET_s;
+    int16_t _automatic_edge_EDGETIME_TARGET_MIN_S = DEFAULT_EDGETIME_TARGET_MIN_S;
+    int16_t _automatic_edge_EDGETIME_TARGET_MAX_s = DEFAULT_EDGETIME_TARGET_MAX_s;
+    int16_t _automatic_edge_MIN_COOLDOWN_s = DEFAULT_MIN_COOLDOWN_s;
+    int16_t _automatic_edge_MAX_COOLDOWN_s = DEFAULT_MAX_COOLDOWN_s;
 
     bool _hasSession = false;
     #if (defined(EDGEALGORITHM) && EDGEALGORITHM==1)
@@ -331,6 +390,7 @@ class Logic : public CustomCoroutine
 
 class Sensor : public CustomCoroutine
 {
+  using super = CustomCoroutine;
 public:
     void Setup();
     virtual int runCoroutine() override;
@@ -338,10 +398,12 @@ public:
 
 class Vibrator : public CustomCoroutine
 {
+  using super = CustomCoroutine;
   struct
   {
     bool powered = false;
     uint8_t mode = 0;
+    uint32_t lastChange = 0;
   } _currentState, _targetState;
   static constexpr uint8_t MAX_LEVEL = 6;
   public:
@@ -357,6 +419,10 @@ class Vibrator : public CustomCoroutine
     bool isVibratorOn() { return _currentState.powered; }
     int map_motspeed_to_vibrator();
 
+    bool IsChanging() const { 
+      return (_currentState.powered != _targetState.powered) || getStateDiff()!=0;
+    }
+
     virtual int runCoroutine() override;
   protected:
     int8_t getStateDiff() const 
@@ -369,10 +435,12 @@ class Vibrator : public CustomCoroutine
 
 class LEDs : public CustomCoroutine
 {
+  using super = CustomCoroutine;
   public:
     void Setup();
     void Update();
 
+    //virtual bool IsSuspended();
     virtual int runCoroutine() override 
     {
       COROUTINE_LOOP()
@@ -385,6 +453,7 @@ class LEDs : public CustomCoroutine
 
 class LCD : public CustomCoroutine
 {
+  using super = CustomCoroutine;
   private:
     static U8G2_SSD1306_128X32_UNIVISION_1_HW_I2C u8g2;
 
@@ -401,6 +470,7 @@ class LCD : public CustomCoroutine
       g_lastEdgeCountChange=_lastTargetChange=0;
     }
 
+    virtual bool IsSuspended() const override;
     virtual int runCoroutine() override;
 
     template <typename T, typename I, int idx = 0, typename... Iremainder>
@@ -411,12 +481,13 @@ class LCD : public CustomCoroutine
     static void lcdfunc_renderText();
     static void lcdfunc_renderTarget();
     static void lcdfunc_renderPressure();
+    static void lcdfunc_renderStabilization();
 
     static void RenderPanic(const String _str);
   public:
     static unsigned long _lastTargetChange;
   private:
-    union lcdrenderdata_t
+    struct lcdrenderdata_t
     {
       int32_t integer32;
       const char *stringptr;
@@ -427,16 +498,16 @@ class LCD : public CustomCoroutine
         return arg;
       }
 
-      const char *operator=(const char *arg)
+      const char* operator=(const char *arg)
       {
         stringptr = arg;
         return arg;
       }
-    } static lcdrenderdata[2];
+    } static lcdrenderdata[8];
     int8_t _mode = 0;
     unsigned long _lastChange = millis();
 } g_lcd;
-LCD::lcdrenderdata_t LCD::lcdrenderdata[2]{};
+LCD::lcdrenderdata_t LCD::lcdrenderdata[8];
 unsigned long LCD::_lastTargetChange = 0;
 LCD::lcdrender_t LCD::lcdrender_activefunc = nullptr;
 U8G2_SSD1306_128X32_UNIVISION_1_HW_I2C LCD::u8g2(U8G2_R0, /* reset=*/ U8X8_PIN_NONE);
@@ -449,14 +520,18 @@ struct LogData
   int32_t param4{};
   int32_t param5{};
   int32_t param6{};
+  int32_t param7{};
+  int32_t param8{};
 };
 
 class WIFI : public CustomCoroutine
 {
+  using super = CustomCoroutine;
   private:
     struct internalLog
     {
       uint64_t time=0;
+      int8_t  channel=0;
       LogData data{};
     };
     uint64_t _lastPing=0;
@@ -479,11 +554,15 @@ class WIFI : public CustomCoroutine
     void Setup();
     void Update();
 
+    virtual bool IsSuspended() const;
+
     virtual int runCoroutine() override;
 
     void LogBeginSession() { _session.clear(); _resetSession = true; }
     void LogEndSession();
-    void LogSessionTick(unsigned long long, const LogData& logData);
+    void LogSessionTick(const LogData& logData);
+    void LogMotorChange(bool pNewMotorState, uint32_t pRequestTime, uint8_t pMotorLevel);
+    void LogEdgeChange(uint16_t pEdgeCount);
 
     void ClearSession() { _session.clear(); _resetSession = false; }
     void FlagDisconnected() { _connected=false; };
@@ -523,12 +602,26 @@ void getMenuItemLabels(MenuItemsEnum pValue, String& output)
     case MenuItemsEnum::automatic_input_time: output = F("Duration: "); return;
     case MenuItemsEnum::automatic_input_min: output = F("Start treshold: "); return;
     case MenuItemsEnum::automatic_input_max: output = F("End treshold: "); return;
+    case MenuItemsEnum::automatic_input_stabilization_maximum: output = F("Stab. target: "); return;
+    case MenuItemsEnum::automatic_input_edge_INITIALCOOLDOWN_s: output = F("edge-initial-cooldown(s)"); return;
+    case MenuItemsEnum::automatic_input_edge_COOLDOWN_ADJUSTMENT_FASTER_s: output = F("edge-adjust-faster(s)"); return;
+    case MenuItemsEnum::automatic_input_edge_COOLDOWN_ADJUSTMENT_SLOWER_s: output = F("edge-adjust-slower(s)"); return;
+    case MenuItemsEnum::automatic_input_edge_EDGETIME_TARGET_s: output = F("edge-time-targ(s)"); return;
+    case MenuItemsEnum::automatic_input_edge_EDGETIME_TARGET_MIN_S: output = F("edge-time-min(s)"); return;
+    case MenuItemsEnum::automatic_input_edge_EDGETIME_TARGET_MAX_s: output = F("edge-time-max(s)"); return;
+    case MenuItemsEnum::automatic_input_edge_MIN_COOLDOWN_s: output = F("edge-cooldown-min(s)"); return;
+    case MenuItemsEnum::automatic_input_edge_MAX_COOLDOWN_s: output = F("edge-cooldown-max(s)"); return;
     case MenuItemsEnum::automatic_back: output = F("[ Back ]"); return;
     case MenuItemsEnum::select_host: output = "Host: "; output += NOGASM_LOGGER_HOST[g_wifi.GetSelectedHost()].toString(); return;
     case MenuItemsEnum::toggle_online: output = (g_wifi.GetOnlineMode() ? F("Go offline") : F("Go online")); return;
     case MenuItemsEnum::resetSession: output = F("Reset Session"); return;
     case MenuItemsEnum::LAST: output = F("!ERROR!"); return;
   }
+}
+
+bool LCD::IsSuspended() const
+{
+  return g_vibrator.IsChanging() || super::IsSuspended();
 }
 
 int LCD::runCoroutine()
@@ -553,7 +646,7 @@ void LCD::Update()
     lcdrender_activefunc();
     if (!u8g2.nextPage())
     {
-      memset(&lcdrenderdata[0], 0, sizeof(lcdrenderdata));
+      //memset(&lcdrenderdata[0], 0, sizeof(lcdrenderdata));
       lcdrender_activefunc = nullptr;
     }
   }
@@ -588,6 +681,10 @@ void LCD::run_lcd_status(MachineStates state)
   {
     setLCDFunc(lcdfunc_renderMenu, 0);
   }
+  else if (state == MachineStates::stabilize)
+  {
+    setLCDFunc(lcdfunc_renderStabilization, g_PressureVariance, g_PressureVarianceMaximum);
+  }
   else
   {
     const auto now = millis();
@@ -612,7 +709,7 @@ void LCD::run_lcd_status(MachineStates state)
     {
       case 0:
         {
-          setLCDFunc(lcdfunc_renderPressure, g_currentPressure, g_avgPressure);
+          setLCDFunc(lcdfunc_renderPressure, g_currentPressure, g_avgPressure, (int16_t)g_PressureVariance, (int16_t)g_PressureVarianceMaximum, 1337);
         } break;
       case 1:
         {
@@ -627,15 +724,15 @@ void LCD::run_lcd_status(MachineStates state)
 }
 
 template<typename T, typename I, int idx, typename ...Iremainder>
-void LCD::setLCDFunc(T func, I arg, Iremainder... args)
+void LCD::setLCDFunc(T func, volatile I arg, Iremainder... args)
 {
   if (lcdrender_activefunc == nullptr)
   {
-    if (idx < sizeof(lcdrenderdata)/sizeof(lcdrenderdata[0]))
+    if constexpr(idx < std::size(lcdrenderdata))
     {
-      lcdrenderdata[idx] = arg;
+      LCD::lcdrenderdata[idx] = arg;
     }
-    if constexpr(idx < sizeof...(args))
+    if constexpr(sizeof...(args)>0)
     {
       setLCDFunc<T,I,idx+1>(func, args...);
     }
@@ -674,9 +771,17 @@ void LCD::lcdfunc_renderMenu()
     case MenuItemsEnum::automatic_input_max:
     text += g_logic.getAutomaticInputMax();
     break; 
+    case MenuItemsEnum::automatic_input_stabilization_maximum:
+    text += g_PressureVarianceMaximum;
+    break;
   }
 
-  const auto textWidth = u8g2.getStrWidth(text.c_str());
+  auto textWidth = u8g2.getStrWidth(text.c_str());
+  if (textWidth > u8g2.getDisplayWidth())
+  {
+    u8g2.setFont(font_8pt);
+    textWidth = u8g2.getStrWidth(text.c_str());
+  }
   u8g2.setCursor((u8g2.getDisplayWidth()/2) - (textWidth/2), 20);
   u8g2.print(text);
   
@@ -699,17 +804,30 @@ void LCD::lcdfunc_renderMenu()
 void LCD::lcdfunc_renderPressure()
 {
   u8g2.setFont(font_13pt);
-  u8g2.setCursor(0, 20);
+  u8g2.setCursor(0, u8g2.getMaxCharHeight());
   u8g2.print(F("P"));
-  u8g2.setFont(font_24pt);
+  u8g2.setFont(font_15pt);
   u8g2.setCursor(10, u8g2.getMaxCharHeight());
   u8g2.print(lcdrenderdata[0].integer32);
   u8g2.setCursor(50, u8g2.getMaxCharHeight());
   u8g2.setFont(font_13pt);
   u8g2.print(F("vs"));
-  u8g2.setFont(font_24pt);
-  u8g2.setCursor(60, u8g2.getMaxCharHeight());
+  u8g2.setFont(font_15pt);
+  u8g2.setCursor(65, u8g2.getMaxCharHeight());
   u8g2.print(lcdrenderdata[1].integer32);
+
+  u8g2.setFont(font_13pt);
+  u8g2.setCursor(0, 2+(u8g2.getMaxCharHeight()*2));
+  u8g2.print(F("V"));
+  u8g2.setFont(font_15pt);
+  u8g2.setCursor(10, 2+(u8g2.getMaxCharHeight()*2));
+  u8g2.print(lcdrenderdata[2].integer32);
+  u8g2.setCursor(50, 2+(u8g2.getMaxCharHeight()*2));
+  u8g2.setFont(font_13pt);
+  u8g2.print(F("vs"));
+  u8g2.setFont(font_15pt);
+  u8g2.setCursor(65, 2+(u8g2.getMaxCharHeight()*2));
+  u8g2.print(lcdrenderdata[3].integer32);
 }
 
 void LCD::lcdfunc_renderTarget()
@@ -849,6 +967,22 @@ namespace bitmaps
   #endif
 }
 
+void LCD::lcdfunc_renderStabilization()
+{
+  u8g2.setFont(font_18pt);
+  u8g2.setCursor(0, u8g2.getMaxCharHeight());
+  u8g2.print(F("Edged!"));
+  u8g2.setFont(font_15pt);
+  u8g2.setCursor(0, 2+(u8g2.getMaxCharHeight()*2));
+  u8g2.print(F("v"));
+  u8g2.setCursor(10, 2+(u8g2.getMaxCharHeight()*2));
+  u8g2.print(uint32_t(lcdrenderdata[0].integer32));
+  u8g2.setCursor(50, 2+(u8g2.getMaxCharHeight()*2));
+  u8g2.print(F("vs"));
+  u8g2.setCursor(70, 2+(u8g2.getMaxCharHeight()*2));
+  u8g2.print(uint32_t(lcdrenderdata[1].integer32));
+}
+
 /////////////////////////////////////////////////////
 // Vibrator
 int Vibrator::runCoroutine()
@@ -868,6 +1002,7 @@ int Vibrator::runCoroutine()
         digitalWrite(PIN_VIBRATOR_ONOFF, HIGH);
         COROUTINE_DELAY(VIBRATOR_PUSH_DELAY);
         digitalWrite(PIN_VIBRATOR_ONOFF, LOW);
+        g_wifi.LogMotorChange(true, _targetState.lastChange, _targetState.mode);
         COROUTINE_DELAY(VIBRATOR_PUSH_DELAY);
       }
       g_wifi.Resume();
@@ -883,6 +1018,7 @@ int Vibrator::runCoroutine()
         digitalWrite(PIN_VIBRATOR_ONOFF, HIGH);
         COROUTINE_DELAY(VIBRATOR_PUSH_DELAY);
         digitalWrite(PIN_VIBRATOR_ONOFF, LOW);
+        g_wifi.LogMotorChange(false, _targetState.lastChange, _targetState.mode);
         COROUTINE_DELAY(VIBRATOR_PUSH_DELAY);
       }
       g_wifi.Resume();
@@ -910,6 +1046,7 @@ int Vibrator::runCoroutine()
             digitalWrite(PIN_VIBRATOR_UP, HIGH);
             COROUTINE_DELAY(VIBRATOR_PUSH_DELAY);
             digitalWrite(PIN_VIBRATOR_UP, LOW);
+            g_wifi.LogMotorChange(true, _targetState.lastChange, _targetState.mode);
             COROUTINE_DELAY(VIBRATOR_PUSH_DELAY);
           }
           g_wifi.Resume();
@@ -927,6 +1064,7 @@ int Vibrator::runCoroutine()
             digitalWrite(PIN_VIBRATOR_DOWN, HIGH);
             COROUTINE_DELAY(VIBRATOR_PUSH_DELAY);
             digitalWrite(PIN_VIBRATOR_DOWN, LOW);
+            g_wifi.LogMotorChange(true, _targetState.lastChange, _targetState.mode);
             COROUTINE_DELAY(VIBRATOR_PUSH_DELAY);
           }
           g_wifi.Resume();
@@ -954,16 +1092,17 @@ void Vibrator::Update()
 
 }
 
-void Vibrator::vibrator_up() { if (_targetState.mode<MAX_LEVEL) {  _targetState.mode++; } }
-void Vibrator::vibrator_down() { if (_targetState.mode>0) { _targetState.mode--; } }
-void Vibrator::vibrator_off() { _targetState.powered = false; }
-void Vibrator::vibrator_reset() { _targetState.mode=0; _currentState.mode=MAX_LEVEL; }
-void Vibrator::vibrator_on() { if (!_targetState.powered) { _targetState.powered = true; } }
+void Vibrator::vibrator_up() { if (_targetState.mode<MAX_LEVEL) {  _targetState.mode++; _targetState.lastChange=millis(); } }
+void Vibrator::vibrator_down() { if (_targetState.mode>0) { _targetState.mode--;  _targetState.lastChange=millis();} }
+void Vibrator::vibrator_off() { _targetState.powered = false;  _targetState.lastChange=millis(); }
+void Vibrator::vibrator_reset() { _targetState.mode=0; _currentState.mode=MAX_LEVEL;  _targetState.lastChange=millis(); }
+void Vibrator::vibrator_on() { if (!_targetState.powered) { _targetState.powered = true;  _targetState.lastChange=millis(); } }
 void Vibrator::vibrator_to(const int mode) 
 { 
   if(mode > 0)
   {
     _targetState.mode = clamp<int>(mode-1, 0, MAX_LEVEL); 
+    _targetState.lastChange=millis();
   }
 }
 
@@ -1023,6 +1162,8 @@ void Sensor::Setup()
       pinMode(BUTTPIN, INPUT); //default is 10 bit resolution (1024), 0-3.3
       g_raOverallPressure.clear(); 
       g_raImmediatePressure.clear();
+      g_raOverallPressureVariance.clear();
+      g_PressureVariance = 0.0f;
     }
 
     int Sensor::runCoroutine() 
@@ -1066,13 +1207,28 @@ void Sensor::Setup()
         {
           s_lastTick = g_tick;
 
+          //update std deviation
+          g_raOverallPressureVariance.push(g_currentPressure);
+          const auto raOverallPressureVarianceCount = g_raOverallPressureVariance.size();
+          const float raOverallPressureVarianceAvg = g_raOverallPressureVariance.get();
+          float pressureVariance = 0.0f;
+          if (raOverallPressureVarianceCount >= 2)
+          {
+            for (int i=0; i < raOverallPressureVarianceCount; i++)
+            {
+              pressureVariance += pow(g_raOverallPressureVariance[i] - raOverallPressureVarianceAvg, 2);
+            }
+            g_PressureVariance = sqrt(pressureVariance/float(raOverallPressureVarianceCount-1));
+          }
+
           //Only update our overall presure if it's not being influenced by the vibe.
           //Or, if it lowers the average pressure...
-          if (!g_vibrator.isVibratorOn() || g_currentPressure < g_raOverallPressure.get())
-          {
-            g_raOverallPressure.push(uint16_t(g_currentPressure));
-          }
+           if ((!g_vibrator.isVibratorOn() && g_logic.getState() != MachineStates::stabilize) || g_currentPressure < g_raOverallPressure.get())
+           {
+              g_raOverallPressure.push(uint16_t(g_currentPressure));
+           }
           g_avgPressure = g_raOverallPressure.get();
+
           COROUTINE_YIELD();
         } else {
           COROUTINE_DELAY(1);
@@ -1088,12 +1244,12 @@ int Logic::runCoroutine()
       {              
         fadeToBlackBy(leds,NUM_LEDS,20); //Create a fading light effect. LED buffer is not otherwise cleared
         _physBtnState = check_button();
-        if (_physBtnState == PhysBtnState::Long && _state != MachineStates::menu)
+        if (_physBtnState == PhysBtnState::Long && getState() != MachineStates::menu)
         {
           change_state(MachineStates::menu);
         }
 
-        run_state_machine(_state);
+        run_state_machine(getState());
         FastLED.show(); //Update the physical LEDs to match the buffer in software
 
         log_session();
@@ -1101,6 +1257,33 @@ int Logic::runCoroutine()
         COROUTINE_YIELD();
       }
     }
+
+void Logic::SaveSettings()
+{
+  EEPROM.put<int16_t>(AUTOEDGE_TIME_ADDR, _automatic_edge_time_minutes);
+  EEPROM.put<int16_t>(AUTOEDGE_MIN_ADDR, _automatic_edge_mintarget);
+  EEPROM.put<int16_t>(AUTOEDGE_MAX_ADDR, _automatic_edge_maxtarget);
+  EEPROM.put<int16_t>(EEPROM_DEFAULT_COOLDOWN_s_ADDR, _automatic_edge_INITIALCOOLDOWN_s);
+  EEPROM.put<int16_t>(EEPROM_DEFAULT_COOLDOWN_ADJUSTMENT_FASTER_s_ADDR, _automatic_edge_COOLDOWN_ADJUSTMENT_FASTER_s);
+  EEPROM.put<int16_t>(EEPROM_DEFAULT_COOLDOWN_ADJUSTMENT_SLOWER_s_ADDR, _automatic_edge_COOLDOWN_ADJUSTMENT_SLOWER_s);
+  EEPROM.put<int16_t>(EEPROM_DEFAULT_EDGETIME_TARGET_s_ADDR, _automatic_edge_EDGETIME_TARGET_s);
+  EEPROM.put<int16_t>(EEPROM_DEFAULT_EDGETIME_TARGET_MIN_S_ADDR, _automatic_edge_EDGETIME_TARGET_MIN_S);
+  EEPROM.put<int16_t>(EEPROM_DEFAULT_EDGETIME_TARGET_MAX_s_ADDR, _automatic_edge_EDGETIME_TARGET_MAX_s);
+  EEPROM.put<int16_t>(EEPROM_DEFAULT_MIN_COOLDOWN_s_ADDR, _automatic_edge_MIN_COOLDOWN_s);
+  EEPROM.put<int16_t>(EEPROM_DEFAULT_MAX_COOLDOWN_s_ADDR, _automatic_edge_MAX_COOLDOWN_s);
+}
+
+void Logic::PushState(MachineStates newState)
+{
+  //Don't call change_state for push/pop state!
+   _state++; 
+   *_state = newState; 
+}
+
+void Logic::PopState() 
+ { 
+  _state--; 
+}
 
 void Logic::Setup()
 {
@@ -1116,6 +1299,15 @@ void Logic::Setup()
   _automatic_edge_maxtarget = clamp(EEPROM.get<int16_t>(AUTOEDGE_MAX_ADDR, _automatic_edge_maxtarget), int16_t(0), int16_t(1000));
   Serial.print("[SETUP] edge time in minutes:");
   Serial.println(_automatic_edge_time_minutes);
+  g_PressureVarianceMaximum = clamp(EEPROM.get<float>(PRESSUREVARMAX_ADDR, g_PressureVarianceMaximum), float(0.0f), float(50.0f));
+  _automatic_edge_INITIALCOOLDOWN_s = clamp(EEPROM.get<int16_t>(EEPROM_DEFAULT_COOLDOWN_s_ADDR, _automatic_edge_INITIALCOOLDOWN_s), int16_t(0), int16_t(120));
+  _automatic_edge_COOLDOWN_ADJUSTMENT_FASTER_s = clamp(EEPROM.get<int16_t>(EEPROM_DEFAULT_COOLDOWN_ADJUSTMENT_FASTER_s_ADDR, _automatic_edge_COOLDOWN_ADJUSTMENT_FASTER_s), int16_t(0), int16_t(120));
+  _automatic_edge_COOLDOWN_ADJUSTMENT_SLOWER_s = clamp(EEPROM.get<int16_t>(EEPROM_DEFAULT_COOLDOWN_ADJUSTMENT_SLOWER_s_ADDR, _automatic_edge_COOLDOWN_ADJUSTMENT_SLOWER_s), int16_t(0), int16_t(120));
+  _automatic_edge_EDGETIME_TARGET_s = clamp(EEPROM.get<int16_t>(EEPROM_DEFAULT_EDGETIME_TARGET_s_ADDR, _automatic_edge_EDGETIME_TARGET_s), int16_t(0), int16_t(120));
+  _automatic_edge_EDGETIME_TARGET_MIN_S = clamp(EEPROM.get<int16_t>(EEPROM_DEFAULT_EDGETIME_TARGET_MIN_S_ADDR, _automatic_edge_EDGETIME_TARGET_MIN_S), int16_t(0), int16_t(120));
+  _automatic_edge_EDGETIME_TARGET_MAX_s = clamp(EEPROM.get<int16_t>(EEPROM_DEFAULT_EDGETIME_TARGET_MAX_s_ADDR, _automatic_edge_EDGETIME_TARGET_MAX_s), int16_t(0), int16_t(120));
+  _automatic_edge_MIN_COOLDOWN_s = clamp(EEPROM.get<int16_t>(EEPROM_DEFAULT_MIN_COOLDOWN_s_ADDR, _automatic_edge_MIN_COOLDOWN_s), int16_t(0), int16_t(120));
+  _automatic_edge_MAX_COOLDOWN_s = clamp(EEPROM.get<int16_t>(EEPROM_DEFAULT_MAX_COOLDOWN_s_ADDR, _automatic_edge_MAX_COOLDOWN_s), int16_t(0), int16_t(120));
 
   _currentMenuItem = &g_rootMenu[1];
   _currentMenuItemState.isFirst = true;
@@ -1123,18 +1315,10 @@ void Logic::Setup()
   change_state(MachineStates::menu);
 }
 
-#define DEFAULT_COOLDOWN_s 45.0f
-#define DEFAULT_COOLDOWN_ADJUSTMENT_FASTER_s 3.0f
-#define DEFAULT_COOLDOWN_ADJUSTMENT_SLOWER_s 8.0f
-#define DEFAULT_EDGETIME_TARGET_s 27.0f
-#define DEFAULT_EDGETIME_TARGET_MIN_S 2.0f
-#define DEFAULT_EDGETIME_TARGET_MAX_s (DEFAULT_EDGETIME_TARGET_s+13.0f)
-#define DEFAULT_MIN_COOLDOWN_s 20.0f
-#define DEFAULT_MAX_COOLDOWN_s 45.0f
 void Logic::resetSession()
 {
 #if (defined(EDGEALGORITHM) && EDGEALGORITHM == 1)
-  _cooldown = DEFAULT_COOLDOWN_s;
+  _cooldown = _automatic_edge_INITIALCOOLDOWN_s;
   _lastEdgeTime = millis();
 #endif
   _autoTimeStart = millis();
@@ -1169,18 +1353,90 @@ void Logic::run_menu()
           _readVariable = &_automatic_edge_time_minutes;
           _readVariableMin = 5;
           _readVariableMax = 120;
+          _writeVariableCallback = [](const int16_t* pWrittenVariable){ g_logic.SaveSettings(); };
           change_state(MachineStates::read_variable); 
         } break;
         case MenuItemsEnum::automatic_input_min: { 
           _readVariable = &_automatic_edge_mintarget;
           _readVariableMin = 0;
           _readVariableMax = 1500;
+          _writeVariableCallback = [](const int16_t* pWrittenVariable){ g_logic.SaveSettings(); };
           change_state(MachineStates::read_variable); 
         } break;
         case MenuItemsEnum::automatic_input_max: { 
           _readVariable = &_automatic_edge_maxtarget;
           _readVariableMin = 0;
           _readVariableMax = 1500;
+          _writeVariableCallback = [](const int16_t* pWrittenVariable){ g_logic.SaveSettings(); };
+          change_state(MachineStates::read_variable); 
+        } break;
+        case MenuItemsEnum::automatic_input_edge_INITIALCOOLDOWN_s: {
+          _readVariable = &_automatic_edge_INITIALCOOLDOWN_s;
+          _readVariableMin = 0;
+          _readVariableMax = 120;
+          _writeVariableCallback = [](const int16_t* pWrittenVariable){ g_logic.SaveSettings(); };
+          change_state(MachineStates::read_variable);
+        } break;
+        case MenuItemsEnum::automatic_input_edge_COOLDOWN_ADJUSTMENT_FASTER_s: {
+          _readVariable = &_automatic_edge_COOLDOWN_ADJUSTMENT_FASTER_s;
+          _readVariableMin = 0;
+          _readVariableMax = 120;
+          _writeVariableCallback = [](const int16_t* pWrittenVariable){ g_logic.SaveSettings(); };
+          change_state(MachineStates::read_variable);
+        } break;
+        case MenuItemsEnum::automatic_input_edge_COOLDOWN_ADJUSTMENT_SLOWER_s: {
+          _readVariable = &_automatic_edge_COOLDOWN_ADJUSTMENT_SLOWER_s;
+          _readVariableMin = 0;
+          _readVariableMax = 120;
+          _writeVariableCallback = [](const int16_t* pWrittenVariable){ g_logic.SaveSettings(); };
+          change_state(MachineStates::read_variable);
+        } break;
+        case MenuItemsEnum::automatic_input_edge_EDGETIME_TARGET_s: {
+          _readVariable = &_automatic_edge_EDGETIME_TARGET_s;
+          _readVariableMin = 0;
+          _readVariableMax = 120;
+          _writeVariableCallback = [](const int16_t* pWrittenVariable){ g_logic.SaveSettings(); };
+          change_state(MachineStates::read_variable);
+        } break;
+        case MenuItemsEnum::automatic_input_edge_EDGETIME_TARGET_MIN_S: {
+          _readVariable = &_automatic_edge_EDGETIME_TARGET_MIN_S;
+          _readVariableMin = 0;
+          _readVariableMax = 120;
+          _writeVariableCallback = [](const int16_t* pWrittenVariable){ g_logic.SaveSettings(); };
+          change_state(MachineStates::read_variable);
+        } break;
+        case MenuItemsEnum::automatic_input_edge_EDGETIME_TARGET_MAX_s: {
+          _readVariable = &_automatic_edge_EDGETIME_TARGET_MAX_s;
+          _readVariableMin = 0;
+          _readVariableMax = 120;
+          _writeVariableCallback = [](const int16_t* pWrittenVariable){ g_logic.SaveSettings(); };
+          change_state(MachineStates::read_variable);
+        } break;
+        case MenuItemsEnum::automatic_input_edge_MIN_COOLDOWN_s: {
+          _readVariable = &_automatic_edge_MIN_COOLDOWN_s;
+          _readVariableMin = 0;
+          _readVariableMax = 120;
+          _writeVariableCallback = [](const int16_t* pWrittenVariable){ g_logic.SaveSettings(); };
+          change_state(MachineStates::read_variable);
+        } break;
+        case MenuItemsEnum::automatic_input_edge_MAX_COOLDOWN_s: {
+          _readVariable = &_automatic_edge_MAX_COOLDOWN_s;
+          _readVariableMin = 0;
+          _readVariableMax = 120;
+          _writeVariableCallback = [](const int16_t* pWrittenVariable){ g_logic.SaveSettings(); };
+          change_state(MachineStates::read_variable);
+        } break;
+        case MenuItemsEnum::automatic_input_stabilization_maximum: {
+          static int16_t dummy;
+          dummy=(int16_t)g_PressureVarianceMaximum;
+          _readVariable = &dummy;
+          _readVariableMin = 0;
+          _readVariableMax = 1500;
+          _writeVariableCallback = [](const int16_t* pWrittenVariable){ 
+            g_PressureVarianceMaximum=(float)*pWrittenVariable; 
+            EEPROM.put<float>(PRESSUREVARMAX_ADDR, g_PressureVarianceMaximum);
+            Serial.println("Stored PRESSUREVARMAX_ADDR");
+          };
           change_state(MachineStates::read_variable); 
         } break;
         case MenuItemsEnum::select_host: { 
@@ -1235,6 +1491,7 @@ void Logic::run_menu()
 void Logic::run_read_variable()
 {
   auto& var = *_readVariable;
+
   static String displayTxt;
   displayTxt = F("> ");
   displayTxt += var;
@@ -1257,6 +1514,10 @@ void Logic::run_read_variable()
   //confirm, go back to menu.
   if (_physBtnState == PhysBtnState::Short)
   {
+    if (_writeVariableCallback != nullptr)
+    {
+      _writeVariableCallback(&var);
+    }
     change_state(MachineStates::menu);
   }
 }
@@ -1320,8 +1581,8 @@ void Logic::run_edge_control()
   //* if we haven't edged in the past DEFAULT_MIN_COOLDOWN_s/2 seconds
   //* are within the DEFAULT_EDGETIME_TARGET_MIN_S after the motor starts again.
   int16_t limitOffset=0;
-  if ( !(now < _lastEdgeTime + static_cast<uint16_t>(DEFAULT_MIN_COOLDOWN_s*0.5f*1000.0f)) && 
-        (now < _lastMotorEnableTimeMs + static_cast<uint16_t>(DEFAULT_EDGETIME_TARGET_MIN_S*1.1f*1000.0f)) )
+  if ( !(now < _lastEdgeTime + static_cast<uint16_t>(_automatic_edge_MIN_COOLDOWN_s*0.5f*1000.0f)) && 
+        (now < _lastMotorEnableTimeMs + static_cast<uint16_t>(_automatic_edge_EDGETIME_TARGET_MIN_S*1.1f*1000.0f)) )
   {
     limitOffset = (_automatic_edge_maxtarget - pLimit)*0.5f;
   }
@@ -1334,22 +1595,22 @@ void Logic::run_edge_control()
       #if (defined(EDGEALGORITHM) && EDGEALGORITHM==1)
       //Adjust cooldown
       const float edgeTime = static_cast<float>(now-_lastEdgeTime) / 1000.0f;
-      const float diff = edgeTime - DEFAULT_EDGETIME_TARGET_s;
+      const float diff = edgeTime - _automatic_edge_EDGETIME_TARGET_s;
 
       DEBUG_ONLY(Serial.print(F("Adjusted cooldown: ")));
       DEBUG_ONLY(Serial.print(_cooldown));
       DEBUG_ONLY(Serial.print(F("s -> ")));
       if (diff >= 0.0f)
       { //Too slow
-        const float x = clamp<float>(diff / DEFAULT_EDGETIME_TARGET_MAX_s, 0.0f, 1.0f);
-        const float adjustment = ((pow(x-1.0f, 3.0f))+1.0f) * DEFAULT_COOLDOWN_ADJUSTMENT_FASTER_s;
+        const float x = clamp<float>(diff / _automatic_edge_EDGETIME_TARGET_MAX_s, 0.0f, 1.0f);
+        const float adjustment = ((pow(x-1.0f, 3.0f))+1.0f) * _automatic_edge_COOLDOWN_ADJUSTMENT_FASTER_s;
         _cooldown -= adjustment;
       } else if (diff < 0.0f)
       { //Too fast!
-        const float x = clamp<float>(1.0f - (edgeTime/DEFAULT_EDGETIME_TARGET_s), 0.0f, 1.0f);
-        _cooldown += (((pow(x-1.0f, 3.0f))+1.0f) * DEFAULT_COOLDOWN_ADJUSTMENT_SLOWER_s);
+        const float x = clamp<float>(1.0f - (edgeTime/_automatic_edge_EDGETIME_TARGET_s), 0.0f, 1.0f);
+        _cooldown += (((pow(x-1.0f, 3.0f))+1.0f) * _automatic_edge_COOLDOWN_ADJUSTMENT_SLOWER_s);
       }
-      _cooldown = clamp<float>(_cooldown, DEFAULT_EDGETIME_TARGET_MIN_S, DEFAULT_EDGETIME_TARGET_MAX_s);
+      _cooldown = clamp<float>(_cooldown, _automatic_edge_EDGETIME_TARGET_MIN_S, _automatic_edge_EDGETIME_TARGET_MAX_s);
       _lastEdgeTime = millis();
       DEBUG_ONLY(Serial.print(_cooldown));
       DEBUG_ONLY(Serial.println(F("s.")));
@@ -1359,6 +1620,8 @@ void Logic::run_edge_control()
       g_vibrator.vibrator_reset();
       edgeCount++;
       g_lastEdgeCountChange = millis();
+      g_wifi.LogEdgeChange(edgeCount);
+      PushState(MachineStates::stabilize);
     }
 
     #if !defined(EDGEALGORITHM) || EDGEALGORITHM==0
@@ -1390,6 +1653,20 @@ void Logic::run_edge_control()
   int presDraw = map(constrain(g_currentPressure - g_avgPressure, 0, pLimit), 0, pLimit, 0, NUM_LEDS * 3);
   draw_bars_3(presDraw, CRGB::Green, CRGB::Yellow, CRGB::Red);
   draw_cursor_3(knob, CRGB(50, 50, 200), CRGB::Blue, CRGB::Purple);
+}
+
+//wait for our running average to stabilize
+void Logic::run_stabilize()
+{
+  const auto now = millis();
+  if (g_PressureVariance <= g_PressureVarianceMaximum && (now-_lastEdgeTime) > _automatic_edge_EDGETIME_TARGET_MIN_S*1000)
+  {
+    PopState();
+  }
+  else
+  {
+    g_vibrator.vibrator_off();
+  }
 }
 
 //Poll the knob click button, and check for long/very long presses as well
@@ -1448,13 +1725,14 @@ void Logic::log_session()
   {
     lastTick = now;
     g_wifi.LogSessionTick(
-        now, 
         {int32_t(g_motSpeed), 
         int32_t(g_currentPressure), 
         int32_t(g_avgPressure), 
         int32_t(g_currentPressure - g_avgPressure), 
         int32_t(pLimit), 
-        int32_t(g_logic.GetCooldown()*1000.0f)}
+        int32_t(g_logic.GetCooldown()*1000.0f),
+        int32_t(g_PressureVariance),
+        int32_t(g_PressureVarianceMaximum)}
     );
   }
 }
@@ -1478,6 +1756,11 @@ void Logic::run_state_machine(MachineStates state)
       run_edge_control();
       break;
     }
+    case MachineStates::stabilize:
+    {
+      update_current_status();
+      run_stabilize();
+    } break;
     case MachineStates::menu: 
       run_menu(); 
       break;
@@ -1494,7 +1777,7 @@ void Logic::run_state_machine(MachineStates state)
 //Returns the next state to run. Very long presses will turn the system off (sort of)
 MachineStates Logic::change_state(MachineStates newState)
 {
-  auto oldState = _state;
+  auto oldState = getState();
 
   if (oldState != newState)
   {
@@ -1514,6 +1797,10 @@ MachineStates Logic::change_state(MachineStates newState)
       {
         EEPROM.update(EEPROM_SENSITIVITY_ADDR, sensitivity);
         _autoEdgeTargetOffset = 0;
+      } break;
+      case MachineStates::stabilize:
+      {
+        //handled in push/pop state
       } break;
       default: g_lcd.RenderPanic(F("State not implemented!")); break;
     }
@@ -1564,11 +1851,15 @@ MachineStates Logic::change_state(MachineStates newState)
         g_vibrator.vibrator_reset();
         g_vibrator.vibrator_on();
       } break;
+      case MachineStates::stabilize:
+      {
+        //handled in push/pop state
+      } break;
       default: g_lcd.RenderPanic(F("State not implemented!")); break;
     }
 
-    _state = newState;
-    return _state;
+    *_state = newState;
+    return *_state;
   }
 }
 
@@ -1788,6 +2079,11 @@ int WIFI::runCoroutine()
   }
 }
 
+bool WIFI::IsSuspended() const
+{
+  return g_vibrator.IsChanging() || super::IsSuspended();
+}
+
 void WIFI::Setup()
 {
   _onlineMode = EEPROM.get(EEPROM_ONLINEMODE_ADDR, _onlineMode);
@@ -1858,6 +2154,7 @@ void WIFI::internalSendLog(const internalLog& logData)
   }();
 
   body="{"
+                    "\"channel\": "; body += logData.channel; body += ","
                     "\"session\": \""; body += _session.c_str(); body += "\","
                     "\"time\": "; body+=static_cast<unsigned long>(logData.time-_sessionStartTime); body+=","
                     "\"param1\": "; body+=logData.data.param1; body+=","
@@ -1865,7 +2162,9 @@ void WIFI::internalSendLog(const internalLog& logData)
                     "\"param3\": "; body+=logData.data.param3; body+=","
                     "\"param4\": "; body+=logData.data.param4; body+=","
                     "\"param5\": "; body+=logData.data.param5; body+=","
-                    "\"param6\": "; body+=logData.data.param6;             
+                    "\"param6\": "; body+=logData.data.param6; body+=","
+                    "\"param7\": "; body+=logData.data.param7; body+=","
+                    "\"param8\": "; body+=logData.data.param8;
   body+="}";
 
   if (_udpclient.beginPacket(NOGASM_LOGGER_HOST[g_wifi.GetSelectedHost()], NOGASM_SESSION_PORT) == 1)
@@ -1899,21 +2198,45 @@ void WIFI::LogEndSession()
    _session.clear();
 }
 
-void WIFI::LogSessionTick(unsigned long long tick, const LogData& logData) 
+void WIFI::LogSessionTick(const LogData& logData) 
 {
    if (!_buffer.isFull() && !_session.empty())
    {
      internalLog log;
-     log.time = tick;
+     log.time = millis();
      log.data = logData;
+     log.channel = 0;
      _buffer.push(std::move(log));
    }
-   else
+}
+
+void WIFI::LogMotorChange(bool pNewMotorState, uint32_t pRequestTime, uint8_t pMotorLevel)
+{
+   if (!_buffer.isFull() && !_session.empty())
    {
-    //Serial.println(!_buffer.isFull() ? "buffer was not full" : "fail, buffer full");
-    //Serial.println(!_session.empty() ? "session was set" : "fail, session not set");
+     const int32_t now{millis()};
+     internalLog log;
+     log.time = now;
+     log.data.param1 = (pNewMotorState ? 1 : 0);
+     log.data.param2 = pMotorLevel;
+     log.data.param3 = (now - static_cast<int32_t>(pRequestTime));
+     log.channel = 1;
+     _buffer.push(std::move(log));
    }
 }
+
+void WIFI::LogEdgeChange(uint16_t pEdgeCount)
+{
+   if (!_buffer.isFull() && !_session.empty())
+   {
+     internalLog log;
+     log.time = millis();
+     log.data.param1 = pEdgeCount;
+     log.channel = 2;
+     _buffer.push(std::move(log));
+   }
+}
+
 
 void WIFI::SetOnlineMode(volatile bool pMode, bool pPersist)
 {
