@@ -55,13 +55,13 @@ func handleUDPLog(pc net.PacketConn, addr net.Addr, buf []byte) {
 	if fileIsNew {
 		switch logchannel {
 		case 0:
-			file.WriteString("time_s,motorspeed,current_pressure,avg_pressure,delta_pressure,limit,cooldown,var,var_target\r\n")
+			file.WriteString("time_s,motorspeed,current_pressure,avg_pressure,delta_pressure,limit,cooldown,var,var_target,cum_pressure\r\n")
 		case 1:
 			file.WriteString("time_s,enabled,level,delay\r\n")
 		case 2:
 			file.WriteString("time_s,edgecount\r\n")
 		default:
-			file.WriteString("time_s,param1,param2,param3,param4,param5,param6,param7,param8\r\n")
+			file.WriteString("time_s,param1,param2,param3,param4,param5,param6,param7,param8,param9\r\n")
 		}
 	}
 
@@ -70,10 +70,10 @@ func handleUDPLog(pc net.PacketConn, addr net.Addr, buf []byte) {
 
 	switch logchannel {
 	case 0:
-		file.WriteString(fmt.Sprintf("%5.3f,%v,%v,%v,%v,%v,%v,%v,%v\r\n", timestampS,
+		file.WriteString(fmt.Sprintf("%5.3f,%v,%v,%v,%v,%v,%v,%v,%v,%v\r\n", timestampS,
 			d["param1"], d["param2"], d["param3"],
 			d["param4"], d["param5"], d["param6"],
-			d["param7"], d["param8"]))
+			d["param7"], d["param8"], d["param9"]))
 	case 1:
 		file.WriteString(fmt.Sprintf("%5.3f,%v,%v,%v\r\n", timestampS,
 			d["param1"], d["param2"], d["param3"]))
@@ -81,10 +81,10 @@ func handleUDPLog(pc net.PacketConn, addr net.Addr, buf []byte) {
 		file.WriteString(fmt.Sprintf("%5.3f,%v\r\n", timestampS,
 			d["param1"]))
 	default:
-		file.WriteString(fmt.Sprintf("%5.3f,%v,%v,%v,%v,%v,%v,%v,%v\r\n", timestampS,
+		file.WriteString(fmt.Sprintf("%5.3f,%v,%v,%v,%v,%v,%v,%v,%v,%v\r\n", timestampS,
 			d["param1"], d["param2"], d["param3"],
 			d["param4"], d["param5"], d["param6"],
-			d["param7"], d["param8"]))
+			d["param7"], d["param8"], d["param9"]))
 	}
 
 	// Perform any necessary processing on the request body here.
